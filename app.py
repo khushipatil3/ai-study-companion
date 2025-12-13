@@ -382,18 +382,23 @@ def generate_qna(notes, q_type, marks, client):
         return f"Error generating Q&A: {e}"
         
 def analyze_past_papers(paper_content, notes, client):
-    """Analyzes past paper content against the study notes to find key topics and repeated questions."""
-    system_prompt = """You are an expert exam analyst. Your task is to analyze a collection of past exam questions and generate a detailed study plan for the student.
+    """
+    Analyzes past paper content against the study notes to find key topics and repeated questions.
+    Updated to strictly enforce analysis of questions, not generation of answers from notes.
+    """
+    system_prompt = """You are an expert exam analyst. Your primary task is to **analyze the pattern of questions** extracted from the past exam paper content. You MUST NOT generate answers to the questions.
 
-    Output must be in clear, actionable Markdown format, focusing on:
+    Use the provided Study Notes (Context) only to verify if the key topics identified in the question paper are covered in the student's material.
+
+    Output must be in clear, actionable Markdown format, focusing only on the analysis:
     
-    1.  **Top 5 Most Important Topics:** Extract the 5 concepts/topics that appear most frequently or are tested with the most depth. Rank them 1 to 5.
+    1.  **Top 5 Most Important Topics:** Extract the 5 concepts/topics that appear most frequently or are tested with the most depth in the exam questions. Rank them 1 to 5 based on frequency/weightage.
     2.  **Repeated Question Themes:** Identify questions that, while phrased differently, are essentially testing the same core information (e.g., "Explain X" and "What are the characteristics of X"). List 3-5 distinct themes.
-    3.  **High-Level Strategy:** Provide a 3-point strategy for studying based on this analysis.
+    3.  **High-Level Strategy:** Provide a 3-point strategy for studying based *specifically* on the trends observed in the question content.
 
-    Notes for context (Your study guide): {notes}
+    Study Notes for context: {notes}
     
-    Analysis content (The extracted exam questions): {paper_content}
+    Exam Question Content (The document you must analyze): {paper_content}
     """
     
     # Truncate content if necessary for the LLM context limit
@@ -406,7 +411,7 @@ def analyze_past_papers(paper_content, notes, client):
                 model=GROQ_MODEL, 
                 messages=[
                     {"role": "system", "content": system_prompt.format(notes=notes_truncated, paper_content=content_truncated)},
-                    {"role": "user", "content": "Perform the exam analysis and output the results as described."}
+                    {"role": "user", "content": "Perform the exam analysis and output the results as described (Analysis only, no answers)."}
                 ],
                 temperature=0.4
             )
@@ -698,7 +703,7 @@ with st.sidebar:
                 st.session_state.quiz_data = None 
                 st.session_state.quiz_type = 'general' 
                 st.session_state.exam_analysis_text = None 
-                st.session_state.exam_analysis_pdf_content = "" # Reset analysis PDF content
+                st.session_state.exam_analysis_pdf_content = "" 
                 st.rerun()
         st.markdown("---")
                 
