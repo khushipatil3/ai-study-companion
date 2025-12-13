@@ -5,9 +5,8 @@ import base64
 import sqlite3
 import json
 import re
-from datetime import date, timedelta
-import os
-import time # For progress bars
+from datetime import date, timedelta # Keeping timedelta for basic logic/future use
+import os # Keeping OS import for safety
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="AI Study Companion", page_icon="🎓", layout="wide")
@@ -33,22 +32,12 @@ st.markdown("""
         margin-bottom: 20px;
         font-size: 0.95em;
     }
-    .analogy-box {
-        background-color: #fffacd; /* Light yellow color */
+    .question-box {
+        background-color: #ffffff;
         padding: 15px;
-        border-radius: 5px;
-        border-left: 5px solid #daa520; /* Gold color */
-        margin-top: 15px;
-        margin-bottom: 10px;
-        font-size: 0.95em;
-    }
-    .confidence-low {
-        color: #ff4b4b; /* Red */
-        font-weight: bold;
-    }
-    .confidence-high {
-        color: #26b27e; /* Green */
-        font-weight: bold;
+        border-radius: 10px;
+        border: 1px solid #e0e0e0;
+        margin-bottom: 15px;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -58,137 +47,57 @@ def init_db():
     conn = sqlite3.connect('study_db.sqlite')
     c = conn.cursor()
     
-    # --- GUARANTEED WIPE ---
+    # --- WIPE AND RECREATE SIMPLE TABLES (Guaranteed stability) ---
     c.execute("DROP TABLE IF EXISTS projects")
     c.execute("DROP TABLE IF EXISTS quiz_performance")
-    c.execute("DROP TABLE IF EXISTS srs_schedule")
     
-    # Recreate all tables with the correct, latest schema
+    # Simple Projects table (Only 5 original columns)
     c.execute('''CREATE TABLE projects (
-        name TEXT PRIMARY KEY, level TEXT, notes TEXT, raw_text TEXT, progress INTEGER DEFAULT 0, analogy_cache TEXT
+        name TEXT PRIMARY KEY, level TEXT, notes TEXT, raw_text TEXT, progress INTEGER DEFAULT 0
     )''')
+    # Simple Quiz table (No confidence, no SRS columns)
     c.execute('''CREATE TABLE quiz_performance (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, project_name TEXT, topic_tag TEXT, question_type TEXT, is_correct INTEGER, confidence TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        id INTEGER PRIMARY KEY AUTOINCREMENT, project_name TEXT, topic_tag TEXT, question_type TEXT, is_correct INTEGER, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
     )''')
-    c.execute('''
-        CREATE TABLE srs_schedule (
-            project_name TEXT, topic_tag TEXT, next_review DATE, interval_days INTEGER, PRIMARY KEY (project_name, topic_tag)
-        )
-    ''')
-    conn.commit()
-    conn.close()
-
-def save_project_to_db(name, level, notes, raw_text, analogy_cache=None):
-    conn = sqlite3.connect('study_db.sqlite')
-    c = conn.cursor()
-    
-    existing_cache = c.execute("SELECT analogy_cache FROM projects WHERE name=?", (name,)).fetchone()
-    if existing_cache and analogy_cache is None:
-        analogy_cache = existing_cache[0]
-
-    c.execute('''
-        INSERT OR REPLACE INTO projects (name, level, notes, raw_text, progress, analogy_cache)
-        VALUES (?, ?, ?, ?, ?, ?)
-    ''', (name, level, notes, raw_text, 0, analogy_cache))
     
     conn.commit()
     conn.close()
 
-def update_analogy_cache(project_name, cache_data):
+def save_project_to_db(name, level, notes, raw_text):
     conn = sqlite3.connect('study_db.sqlite')
     c = conn.cursor()
-    c.execute('UPDATE projects SET analogy_cache=? WHERE name=?', (cache_data, project_name))
+    # Simple INSERT for the 5-column table
+    c.execute('INSERT OR REPLACE INTO projects (name, level, notes, raw_text, progress) VALUES (?, ?, ?, ?, ?)', 
+              (name, level, notes, raw_text, 0))
     conn.commit()
     conn.close()
 
-def log_quiz_result(project_name, topic, q_type, correct, confidence):
+def log_quiz_result(project_name, topic, q_type, correct):
+    # Log without confidence column
     conn = sqlite3.connect('study_db.sqlite')
     c = conn.cursor()
-    c.execute('INSERT INTO quiz_performance (project_name, topic_tag, question_type, is_correct, confidence) VALUES (?, ?, ?, ?, ?)',
-              (project_name, topic, q_type, 1 if correct else 0, confidence))
-    
-    # --- SRS LOGIC ---
-    current_date = date.today()
-    interval_days = 0
-    existing_interval = c.execute('SELECT interval_days FROM srs_schedule WHERE project_name=? AND topic_tag=?', (project_name, topic)).fetchone()
-    if existing_interval:
-        interval_days = existing_interval[0]
-    
-    if correct:
-        if confidence == 'High': 
-            new_interval = max(interval_days * 2, 5)
-        else:
-            new_interval = max(interval_days + 1, 2)
-    else:
-        new_interval = 1 
-        
-    next_review = current_date + timedelta(days=new_interval)
-    
-    c.execute('''
-        INSERT OR REPLACE INTO srs_schedule (project_name, topic_tag, next_review, interval_days)
-        VALUES (?, ?, ?, ?)
-    ''', (project_name, topic, next_review.isoformat(), new_interval))
-    
+    c.execute('INSERT INTO quiz_performance (project_name, topic_tag, question_type, is_correct) VALUES (?, ?, ?, ?)',
+              (project_name, topic, q_type, 1 if correct else 0))
     conn.commit()
     conn.close()
 
-def get_topics_for_review(project_name):
-    """Finds topics that are due for review today or have low accuracy."""
-    conn = sqlite3.connect('study_db.sqlite')
-    c = conn.cursor()
-    today = date.today().isoformat()
-    
-    srs_topics = c.execute('''
-        SELECT topic_tag FROM srs_schedule
-        WHERE project_name = ? AND next_review <= ?
-    ''', (project_name, today)).fetchall()
-    
-    weak_topics = c.execute('''
-        SELECT topic_tag FROM quiz_performance
-        WHERE project_name = ?
-        GROUP BY topic_tag
-        HAVING AVG(is_correct) < 0.6
-    ''', (project_name,)).fetchall()
-    
-    conn.close()
-    
-    all_topics = set([t[0] for t in srs_topics] + [t[0] for t in weak_topics])
-    return list(all_topics)
-
-def get_topic_performance(project_name):
-    """Returns weak (<60%) and strong (>60%) topics."""
+def get_weak_areas(project_name):
+    # Retrieve weak areas based only on accuracy
     conn = sqlite3.connect('study_db.sqlite')
     c = conn.cursor()
     c.execute('''SELECT topic_tag, AVG(is_correct) as accuracy FROM quiz_performance WHERE project_name = ? GROUP BY topic_tag ORDER BY accuracy ASC''', (project_name,))
     data = c.fetchall()
     conn.close()
-    
-    weak = [row[0] for row in data if row[1] < 0.6]
-    strong = [row[0] for row in data if row[1] >= 0.6]
-    return weak, strong
+    return [row[0] for row in data if row[1] < 0.6]
 
 def get_project_details(name):
-    """
-    Fetches project details using column names for robustness.
-    """
     conn = sqlite3.connect('study_db.sqlite')
     c = conn.cursor()
+    # Fetch from the simple 5-column table
     c.execute("SELECT * FROM projects WHERE name=?", (name,))
     row = c.fetchone()
-    
-    columns = [desc[0] for desc in c.description]
     conn.close()
-    
-    if row:
-        project_data = {
-            "name": row[columns.index("name")],
-            "level": row[columns.index("level")],
-            "notes": row[columns.index("notes")],
-            "raw_text": row[columns.index("raw_text")],
-            "progress": row[columns.index("progress")],
-            "analogy_cache": row[columns.index("analogy_cache")] if "analogy_cache" in columns else None
-        }
-        return project_data
+    if row: return {"name": row[0], "level": row[1], "notes": row[2], "raw_text": row[3], "progress": row[4]}
     return None
 
 def load_all_projects():
@@ -204,6 +113,7 @@ def encode_image(pix):
     return base64.b64encode(pix.tobytes()).decode('utf-8')
 
 def extract_content_with_vision(uploaded_file, client):
+    # Reset file pointer for stability on re-run
     uploaded_file.seek(0)
     
     doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
@@ -223,12 +133,11 @@ def extract_content_with_vision(uploaded_file, client):
     bar.empty()
     return full_content
 
-# --- BATCH NOTES GENERATION (HIGHLY STABLE) ---
+# --- BATCH NOTES GENERATION (Stabilized) ---
 def generate_study_notes(raw_text, level, client):
-    if not raw_text: return "Error: No content extracted for processing."
+    if not raw_text: return "Error generating notes."
 
     pages = raw_text.split("--- PAGE_BREAK ---")
-    
     batch_size = 5 
     batches = [pages[i:i + batch_size] for i in range(0, len(pages), batch_size)]
     
@@ -237,18 +146,13 @@ def generate_study_notes(raw_text, level, client):
     status_text = st.empty()
     bar = st.progress(0)
     
-    system_instructions = f"""Act as a Professor. Create a comprehensive {level} study guide in Markdown. Use descriptive headers and relevant 
-
-[Image of X]
- tags."""
+    system_instructions = f"""Act as a Professor. Create a comprehensive {level} study guide in Markdown. Use descriptive headers."""
 
     for i, batch in enumerate(batches):
         bar.progress((i + 1) / len(batches))
         status_text.caption(f"🧠 Synthesizing Batch {i+1}/{len(batches)}...")
         
         batch_content = "\n".join(batch)
-        
-        # CRITICAL STABILITY FIX: LIMIT CONTEXT PER BATCH
         limited_batch_content = batch_content[:10000]
 
         prompt = f"""
@@ -273,62 +177,28 @@ def generate_study_notes(raw_text, level, client):
     status_text.empty()
     bar.empty()
     if "(Error processing batch" in final_notes:
-        return "Error generating notes (API Timeout or failure on one batch)."
+        return "Error generating notes."
     return final_notes
 # --- END BATCH NOTES GENERATION ---
 
-# --- BATCH ANALOGY GENERATOR ---
-def generate_batch_analogies(topic_list, client):
-    topic_string = "\n".join([f"- {topic}" for topic in topic_list])
-    
-    prompt = f"""
-    For the following list of concepts, generate a single, simple, real-life analogy or metaphor for each one. 
-    Use a common, everyday example (like cooking, driving, or organizing).
-    
-    Format the output strictly as a JSON object where the key is the topic name and the value is the analogy text.
-    
-    Example: {{"Sparse Matrix": "An almost empty stadium where you only record where the fans are sitting."}}
-    
-    CONCEPTS:
-    {topic_string}
-    
-    Output ONLY valid JSON.
-    """
-    try:
-        completion = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[{"role": "user", "content": prompt}], temperature=0.7, response_format={"type": "json_object"}
-        )
-        content = completion.choices[0].message.content
-        cleaned_content = clean_json_string(content)
-        return json.loads(cleaned_content)
-    except Exception as e:
-        st.error(f"Batch Analogy Error: {str(e)}")
-        return None
-
-# --- TOPIC EXTRACTION HELPER (Pulls headers from notes) ---
-def extract_main_topics(notes_markdown):
-    topics = re.findall(r"^##\s+(.*)", notes_markdown, re.MULTILINE)
-    topics = [t.strip() for t in topics if t.strip() and len(t.strip()) > 5 and not t.strip().startswith(('Study Guide', 'Unit'))]
-    return topics
-
-# --- QUIZ & THEORY GENERATORS ---
-
 def clean_json_string(json_str):
+    """Removes markdown code blocks if the AI adds them."""
     json_str = json_str.strip()
-    if json_str.startswith("```json"): json_str = json_str[7:]
-    if json_str.endswith("```"): json_str = json_str[:-3]
+    if json_str.startswith("```json"):
+        json_str = json_str[7:]
+    if json_str.endswith("```"):
+        json_str = json_str[:-3]
     return json_str.strip()
 
-def generate_objective_quiz(raw_text, focus_topics, client):
+def generate_objective_quiz(raw_text, weak_topics, client):
     if not raw_text or len(raw_text) < 100:
-        return {"error": "Text too short. Please re-upload PDF."}
+        return {"error": "Text too short or empty. Please re-upload PDF."}
 
-    context_text = raw_text[:6000]
-    focus_prompt = f"PRIORITY: Focus strictly on these topics: {', '.join(focus_topics)}" if focus_topics else "Cover general concepts."
+    context_text = raw_text[:6000] 
+    focus_prompt = f"Focus specifically on these weak topics: {', '.join(weak_topics)}" if weak_topics else "Cover all topics evenly."
     
     prompt = f"""
-    Create a JSON object with 5 practice questions (MCQ/TrueFalse) based on the text.
+    Create a JSON object with 5 practice questions (MCQ or True/False) based on the text.
     {focus_prompt}
     
     IMPORTANT: For each question, provide an 'explanation' field (2-sentence quick recap of the concept).
@@ -337,14 +207,18 @@ def generate_objective_quiz(raw_text, focus_topics, client):
     {{
         "questions": [
             {{
-                "type": "MCQ", "question": "Question text...", "options": ["A", "B", "C", "D"],
-                "correct_option": "A", "topic": "Topic Name", "explanation": "Concept recap here..."
+                "type": "MCQ",
+                "question": "Question text...",
+                "options": ["A", "B", "C", "D"],
+                "correct_option": "A",
+                "topic": "Topic Name",
+                "explanation": "Concept recap here..."
             }}
         ]
     }}
     
     CONTENT: {context_text}
-    Output ONLY valid JSON.
+    Output ONLY valid JSON. Do not add markdown or intro text.
     """
     try:
         completion = client.chat.completions.create(
@@ -362,7 +236,7 @@ def generate_theory_questions(raw_text, q_type, marks, num_q, client):
 
     context_text = raw_text[:6000]
     length_instruction = "Answer in 2-3 sentences." if q_type == "Short" else "Answer in 2 paragraphs."
-    if q_type == "Custom": length_instruction = f"These are {marks}-mark questions. Detail matches marks."
+    if q_type == "Custom": length_instruction = f"These are {marks}-mark questions. The answer should be detailed enough for a {marks}-mark exam question."
     
     prompt = f"""
     Create {num_q} {q_type} Answer Theory Questions based on the text.
@@ -371,7 +245,7 @@ def generate_theory_questions(raw_text, q_type, marks, num_q, client):
     
     Format:
     ### Q1: [Question]
-    **Ideal Answer:** [Answer]
+    **Answer:** [Ideal Answer]
     
     CONTENT: {context_text}
     """
@@ -381,35 +255,7 @@ def generate_theory_questions(raw_text, q_type, marks, num_q, client):
             messages=[{"role": "user", "content": prompt}], temperature=0.4
         )
         return completion.choices[0].message.content
-    except Exception as e: 
-        return f"Error generating theory: {str(e)}"
-
-# --- PYQ ANALYZER LOGIC ---
-def analyze_pyq_pdf(pyq_file, client):
-    doc = fitz.open(stream=pyq_file.read(), filetype="pdf")
-    pyq_text = ""
-    for page in doc:
-        pyq_text += page.get_text()
-    
-    prompt = f"""
-    Analyze the following past examination questions and identify the top 5 most frequently tested topics or concepts.
-    
-    Format the output as a Markdown list:
-    * Topic 1 (Frequency: High) - Focus on Definition and Application.
-    * Topic 2 (Frequency: Medium) - Focus on Examples and Comparison.
-    ...
-    
-    PAST PAPER CONTENT: {pyq_text[:10000]}
-    """
-    try:
-        completion = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[{"role": "user", "content": prompt}], temperature=0.2
-        )
-        return completion.choices[0].message.content
-    except Exception as e:
-        return f"Error analyzing PYQ: {str(e)}"
-
+    except Exception as e: return f"Error generating theory: {str(e)}"
 
 # --- MAIN UI ---
 
@@ -417,11 +263,6 @@ if 'current_project' not in st.session_state: st.session_state.current_project =
 if 'api_key' not in st.session_state: st.session_state.api_key = None
 if 'quiz_submitted' not in st.session_state: st.session_state.quiz_submitted = False
 if 'user_answers' not in st.session_state: st.session_state.user_answers = {}
-if 'analogy_result' not in st.session_state: st.session_state.analogy_result = ""
-if 'pyq_analysis' not in st.session_state: st.session_state.pyq_analysis = None
-if 'custom_analogy_topic' not in st.session_state: st.session_state.custom_analogy_topic = ""
-if 'custom_analogy_result' not in st.session_state: st.session_state.custom_analogy_result = ""
-
 
 with st.sidebar:
     st.title("🗂️ My Library")
@@ -436,9 +277,12 @@ with st.sidebar:
             st.session_state.current_project = p
             st.session_state.quiz_data = None 
             st.session_state.quiz_submitted = False
-            st.session_state.analogy_result = ""
+            st.session_state.user_answers = {}
             st.rerun()
-    if st.button("+ New Project"): st.session_state.current_project = None; st.rerun()
+    if st.button("+ New Project"): 
+        st.session_state.current_project = None
+        st.session_state.quiz_data = None
+        st.rerun()
     
     if st.session_state.get('current_project'):
         with open("study_db.sqlite", "rb") as f:
@@ -475,91 +319,28 @@ else:
 
     st.header(f"📘 {data['name']}")
     
-    tab1, tab_analogy, tab2, tab3, tab4 = st.tabs(["📖 Study Notes", "💡 Analogies Library", "📝 Practice", "📊 Analytics", "🎯 Exam Hacker (PYQ)"])
+    tab1, tab2, tab3 = st.tabs(["📖 Study Notes", "📝 Practice", "📊 Analytics"])
     
-    # --- TAB 1: STUDY NOTES ---
     with tab1:
         st.subheader("📝 Study Guide")
         st.markdown(data['notes'])
         
-    # --- TAB 2: ANALOGY LIBRARY ---
-    with tab_analogy:
-        st.subheader("💡 Contextual Learning: Analogies")
-        st.info("Analogies connect abstract concepts to simple, real-world ideas, improving memory and understanding.")
-        
-        cached_analogies = {}
-        if data['analogy_cache']:
-            try:
-                cached_analogies = json.loads(data['analogy_cache'])
-            except json.JSONDecodeError:
-                st.warning("Could not decode analogy cache. Please regenerate.")
-        
-        # 1. Generate/Load Core Analogies
-        main_topics = extract_main_topics(data['notes'])
-        
-        if st.button("🚀 Generate Analogies for All Core Topics"):
-            topics_to_generate = [t for t in main_topics if t not in cached_analogies]
-            
-            if topics_to_generate:
-                with st.spinner(f"Generating {len(topics_to_generate)} analogies..."):
-                    new_analogies = generate_batch_analogies(topics_to_generate, client)
-                    if new_analogies:
-                        cached_analogies.update(new_analogies)
-                        update_analogy_cache(data['name'], json.dumps(cached_analogies))
-                        st.success("Analogies generated and saved!")
-                    st.rerun()
-            else:
-                st.info("All core topics already have saved analogies.")
-
-        st.divider()
-        st.write("### Core Topic Analogies")
-        if cached_analogies:
-            for topic, analogy in cached_analogies.items():
-                st.markdown(f"""
-                <div class="analogy-box">
-                    <b>{topic}:</b><br>
-                    {analogy}
-                </div>
-                """, unsafe_allow_html=True)
-        else:
-            st.caption("Click the button above to generate analogies for all main headers found in your study notes.")
-
-        st.divider()
-        # 2. Custom Analogy Input
-        st.write("### Custom Concept Analogy")
-        custom_topic = st.text_input("Enter any specific concept:", key='custom_analogy_topic_input', placeholder="e.g., Forward Fill or Monte Carlo")
-        
-        if st.button("💡 Get Custom Analogy") and custom_topic:
-            with st.spinner(f"Generating analogy for '{custom_topic}'..."):
-                result = generate_analogy(custom_topic, client)
-                st.session_state.custom_analogy_result = (custom_topic, result)
-        
-        if st.session_state.custom_analogy_result and st.session_state.custom_analogy_result[0] == st.session_state.custom_analogy_topic_input:
-            topic, result = st.session_state.custom_analogy_result
-            st.markdown(f"""
-            <div class="analogy-box">
-                <b>Analogy for: {topic}</b><br>
-                {result}
-            </div>
-            """, unsafe_allow_html=True)
-            
-    # --- TAB 3: PRACTICE ---
     with tab2:
         st.subheader("🎯 Active Practice")
         mode = st.radio("Select Mode:", ["Objective (Interactive)", "Theory (Study Mode)"], horizontal=True)
         
-        focus_topics = get_topics_for_review(data['name'])
+        weak_spots = get_weak_areas(data['name'])
 
         if mode == "Objective (Interactive)":
             col1, col2 = st.columns([3, 1])
             with col1:
-                if focus_topics: st.warning(f"Adaptively focusing on {len(focus_topics)} topics due for review.")
-                else: st.info("No urgent reviews. Generating general quiz.")
+                if weak_spots: st.warning(f"Adaptively focusing on {len(weak_spots)} weak areas.")
+                else: st.info("Test your knowledge. Results are tracked to identify weak areas.")
 
             with col2:
                 if st.button("🔄 Generate New Quiz"):
                     with st.spinner("Generating adaptive questions..."):
-                        q_data = generate_objective_quiz(data['raw_text'], focus_topics, client)
+                        q_data = generate_objective_quiz(data['raw_text'], weak_spots, client)
                         if "error" in q_data: st.error(q_data["error"])
                         else: 
                             st.session_state.quiz_data = q_data
@@ -575,16 +356,7 @@ else:
                     with st.form("quiz_form"):
                         for i, q in enumerate(qs):
                             st.markdown(f"**Q{i+1}: {q['question']}**")
-                            
-                            # --- METCOG CONFIDENCE SLIDER ---
-                            confidence = st.select_slider(
-                                "How sure are you?", 
-                                options=['Low', 'Medium', 'High'],
-                                key=f"conf_{i}"
-                            )
-                            st.session_state.user_answers[f'conf_{i}'] = confidence 
-                            # ---------------------------------------------
-
+                            # Removed Confidence Slider/Selector
                             if q['type'] == 'MCQ':
                                 st.radio("Choose:", q['options'], key=f"q_input_{i}", index=None)
                             else:
@@ -596,7 +368,6 @@ else:
                         if submitted:
                             for i in range(len(qs)):
                                 st.session_state.user_answers[i] = st.session_state.get(f"q_input_{i}")
-                                st.session_state.user_answers[f'conf_{i}'] = st.session_state.get(f"conf_{i}")
                             st.session_state.quiz_submitted = True
                             st.rerun()
 
@@ -605,19 +376,17 @@ else:
                     score = 0
                     for i, q in enumerate(qs):
                         user_ans = st.session_state.user_answers.get(i)
-                        confidence = st.session_state.user_answers.get(f'conf_{i}', 'N/A')
                         correct = (user_ans == q['correct_option'])
                         if correct: score += 1
                         
-                        # Log with Confidence for SRS
-                        log_quiz_result(data['name'], q.get('topic', 'General'), q['type'], correct, confidence)
+                        # Log without confidence
+                        log_quiz_result(data['name'], q.get('topic', 'General'), q['type'], correct)
                         
                         # RENDER RESULT CARD
                         with st.container():
                             st.markdown(f"""<div class="question-box">
                             <b>Q{i+1}: {q['question']}</b><br>
-                            Your Answer: {user_ans} | 
-                            Confidence: <span class="{'confidence-high' if confidence == 'High' and correct else 'confidence-low'}">{confidence}</span>
+                            Your Answer: {user_ans}
                             </div>""", unsafe_allow_html=True)
                             
                             if correct:
@@ -657,46 +426,28 @@ else:
                     res = generate_theory_questions(data['raw_text'], t_type, marks, num_q, client)
                     st.markdown(res)
 
-    # --- TAB 4: ANALYTICS ---
     with tab3:
-        st.subheader("📈 Performance Analysis (Adaptive Learning)")
+        st.subheader("📈 Performance Analysis")
         
-        weak_spots, strong_spots = get_topic_performance(data['name'])
+        # Displaying simple weak/strong areas based on simple log
+        weak_spots_list = get_weak_areas(data['name'])
         
         col_w, col_s = st.columns(2)
         
         with col_w:
             st.error("⚠️ Weak Areas (Focus Here)")
-            if weak_spots:
-                for t in weak_spots:
+            if weak_spots_list:
+                for t in weak_spots_list:
                     st.markdown(f"- **{t}** (Needs Review)")
             else:
-                st.write("No persistent weak areas detected yet! Keep practicing.")
+                st.write("No weak areas detected yet! Keep practicing.")
                 
         with col_s:
-            st.success("✅ Strong Areas (Review Less Often)")
-            if strong_spots:
-                for t in strong_spots:
-                    st.markdown(f"- **{t}** (Mastered)")
+            st.success("✅ Strong Areas")
+            if weak_spots_list:
+                # Simple logic to show what is NOT weak as strong
+                st.write("Take more quizzes to fully define strong areas.")
             else:
-                st.write("Take a quiz to identify your strengths.")
+                st.write("All topics appear strong so far!")
                 
-        st.caption("Note: Low accuracy and low confidence scores flag a topic as a Weak Area for the next quiz.")
-        
-    # --- TAB 5: EXAM HACKER (PYQ) ---
-    with tab4:
-        st.subheader("🎯 Exam Hacker: Previous Year Questions (PYQ) Analysis")
-        st.info("Upload 1-3 PDFs of past question papers to analyze exam trends and repeated topics.")
-        
-        pyq_upload = st.file_uploader("Upload PYQ PDF", type="pdf", key="pyq_upload")
-        
-        if pyq_upload:
-            if st.button("📊 Analyze Exam Pattern"):
-                with st.spinner("Scanning past papers for high-frequency topics..."):
-                    pyq_output = analyze_pyq_pdf(pyq_upload, client)
-                    st.session_state.pyq_analysis = pyq_output
-        
-        if st.session_state.pyq_analysis:
-            st.success("Top Exam Topics Identified:")
-            st.markdown(st.session_state.pyq_analysis)
-            st.caption("Use these prioritized topics to guide your study focus.")
+        st.caption("Note: The 'Generate New Quiz' button in the Practice tab will automatically prioritize your Weak Areas.")
