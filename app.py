@@ -315,33 +315,7 @@ def generate_interactive_drills(notes, client):
     with st.spinner("Generating general practice drills..."):
         return _attempt_quiz_generation(system_prompt, notes_truncated, client)
 
-
-def generate_adaptive_drills(notes, client, weak_topics):
-    """
-    Generates a quiz targeted at weak topics identified by the progress tracker, with a single strict attempt.
-    If it fails, it returns None, triggering the fallback to the general quiz in the main loop.
-    """
-    weak_topics_list = ", ".join(weak_topics)
-    notes_truncated = notes[:15000]
-
-    # --- Attempt 1: Strict Target ---
-    system_prompt_strict = f"""You are an adaptive quiz master. Your primary goal is to re-test the user on their known weak areas to reinforce learning.
-    The user's identified weak topics are: {weak_topics_list}.
-    Based on the notes, generate a quiz with 10 questions total, ensuring that **at least 7 of the 10 questions focus directly on these weak topics.**
-    The quiz must consist of: 5 Multiple Choice Questions (MCQs). 5 True or False Questions (T/F).
-    Provide 'concept_explanation' for every question. The entire output MUST be a single JSON object.
-    JSON Format MUST match the general quiz format, but the title should be 'Interactive Practice Drill (Targeted)'.
-    """
-    
-    with st.spinner(f"Generating targeted quiz for weak topics: {weak_topics_list} (Strict Focus)..."):
-        quiz_content = _attempt_quiz_generation(system_prompt_strict, notes_truncated, client)
-
-    # Validate if attempt 1 was successful
-    if quiz_content and safe_json_parse(quiz_content):
-        return quiz_content
-    
-    # Return None on failure to trigger the fallback to General Quiz in the calling function
-    return None
+# The generate_adaptive_drills function is REMOVED
 
         
 def generate_study_notes(raw_text, level, client):
@@ -575,7 +549,6 @@ def display_and_grade_quiz(project_name, quiz_json_str):
             # THIS IS THE FORM SUBMIT BUTTON
             submit_button = st.form_submit_button(label='✅ Submit Quiz', type="primary", disabled=st.session_state.quiz_submitted)
         with col_reset:
-            # FIX: Corrected the unterminated string literal error here.
             reset_button = st.form_submit_button(label='🔄 Reset Quiz', type="secondary")
 
     if submit_button:
@@ -858,54 +831,21 @@ else:
                     st.info("Select a generation type above to create your Theory Q&A!")
 
 
-            with sub_tab2: # INTERACTIVE QUIZ (MODIFIED FOR SMART GENERATION)
+            with sub_tab2: # INTERACTIVE QUIZ (GENERAL ONLY)
                 st.subheader("Interactive Practice Quiz (MCQ & T/F)")
                 
-                progress_tracker = json.loads(practice_data.get('progress_tracker') or "{}")
-                
-                # Identify Weak Topics (Accuracy < 100%)
-                weak_topics = []
-                for concept, stats in progress_tracker.items():
-                    # Check for any tested concept where not all attempts were correct
-                    if stats['total'] > 0 and stats['correct'] / stats['total'] < 1.0: 
-                        weak_topics.append(concept)
-                
-                # --- SINGLE SMART GENERATION BUTTON ---
-                
-                button_label = f"🧠 Generate Smart Quiz (Targeting {len(weak_topics)} Weak Points)" if weak_topics else "Generate New General Quiz"
-                button_type = "primary" if weak_topics else "secondary"
-                
-                st.info(f"The next quiz will attempt to target your weak points ({len(weak_topics)}) if available, otherwise a general quiz is generated.")
+                st.info("A new general quiz will be generated every time you click the button below. All results are tracked.")
 
-                if st.button(button_label, type=button_type, key="btn_smart_drills", use_container_width=True):
+                if st.button("Generate New General Quiz", type="primary", key="btn_general_drills", use_container_width=True):
                     
-                    quiz_content = None
-                    quiz_type = 'general'
+                    quiz_content = generate_interactive_drills(project_data['notes'], client)
                     
-                    # 1. Attempt Adaptive Quiz (if weak points exist)
-                    if weak_topics:
-                        quiz_content = generate_adaptive_drills(project_data['notes'], client, weak_topics)
-                        
-                        if quiz_content and safe_json_parse(quiz_content):
-                            quiz_type = 'adaptive'
-                            st.success(f"✅ Successfully generated Adaptive Quiz targeting: {', '.join(weak_topics)}")
-                        else:
-                            st.error("Targeted quiz generation failed. Falling back to General Quiz for reliability.")
-                            quiz_content = None # Ensure it attempts general generation
-                            
-                    # 2. Fallback to General Quiz (if no weak points or adaptive failed)
-                    if quiz_content is None:
-                        quiz_content = generate_interactive_drills(project_data['notes'], client)
-                        quiz_type = 'general'
-                        if weak_topics:
-                            st.warning("Generated General Quiz. Try the Adaptive Quiz again after a successful General run.")
-
                     if quiz_content:
                         db.update_practice_data(project_data['name'], "interactive_quiz_current", quiz_content)
                         st.session_state.quiz_data = quiz_content
                         st.session_state.quiz_submitted = False
                         st.session_state.user_answers = {}
-                        st.session_state.quiz_type = quiz_type
+                        st.session_state.quiz_type = 'general' # Always general now
                         st.rerun()
                     else:
                         st.error("Quiz generation failed completely. Please check your notes or API key.")
@@ -920,12 +860,10 @@ else:
                     # Load the last generated quiz on session rerun if no active quiz
                     quiz_content_stored = practice_data.get('interactive_quiz_current')
                     st.session_state.quiz_data = quiz_content_stored
-                    # Determine quiz type based on title for display consistency
-                    quiz_type_stored = 'adaptive' if 'Targeted' in json.loads(quiz_content_stored).get('quiz_title', '') else 'general'
-                    st.session_state.quiz_type = quiz_type_stored
+                    st.session_state.quiz_type = 'general'
                     display_and_grade_quiz(project_data['name'], st.session_state.quiz_data)
                 else:
-                    st.info("Click the 'Generate New Quiz' button above to start your practice.")
+                    st.info("Click the 'Generate New General Quiz' button above to start your practice.")
 
         # --- TAB 3: PROGRESS TRACKER ---
         with tab3:
