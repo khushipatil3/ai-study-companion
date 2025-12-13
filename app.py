@@ -273,7 +273,6 @@ else:
                 st.info("Test your knowledge. Feedback provided instantly.")
             with col2:
                 if st.button("🔄 Generate New Quiz"):
-                    # ADAPTIVE LOGIC: Prioritize weak spots
                     if weak_spots: 
                         st.toast(f"Adaptively focusing on: {', '.join(weak_spots[:3])}")
                     
@@ -304,16 +303,17 @@ else:
                             if correct: score += 1
                             log_quiz_result(data['name'], q.get('topic', 'General'), q['type'], correct)
                             
-                            # INLINE FEEDBACK (New Feature)
+                            # FEEDBACK SECTION
                             if correct:
                                 st.success(f"Q{i+1}: Correct! ✅")
                             else:
                                 st.error(f"Q{i+1}: Incorrect ❌. The answer is **{q['correct_option']}**.")
                             
-                            # RECAP / EXPLANATION (New Feature)
+                            # RECAP BOX (Safer F-String)
+                            explanation = q.get('explanation', 'Review the notes for this topic.')
                             st.markdown(f"""
                             <div class="recap-box">
-                                <b>💡 Quick Recap:</b> {q.get('explanation', 'Review the notes for this topic.')}
+                                <b>💡 Quick Recap:</b> {explanation}
                             </div>
                             """, unsafe_allow_html=True)
                             st.write("---")
@@ -330,7 +330,6 @@ else:
                 marks = 5
                 if t_type == "Custom": marks = st.number_input("Marks Weightage", 1, 20, 5)
             with col_t3:
-                # NEW FEATURE: Select Number of Questions
                 num_q = st.number_input("Number of Questions", 1, 10, 3)
             
             if st.button("Generate Theory Questions"):
@@ -350,8 +349,8 @@ else:
             if weak_spots:
                 for t in weak_spots:
                     st.markdown(f"- **{t}** (Needs Review)")
-                    # Add image placeholder for weak topic
-                    st.caption(f"
+                    # Visual aid tag safely inserted
+                    st.caption(f"Visual Aid: 
 
 [Image of {t} diagram]
 ")
