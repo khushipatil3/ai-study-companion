@@ -3,6 +3,8 @@ import fitz # PyMuPDF
 from groq import Groq
 import sqlite3
 import json
+import base64 
+# base64 import is not strictly needed after removing vision, but kept for compatibility/future use
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="AI Study Companion", page_icon="🎓", layout="wide")
@@ -27,9 +29,14 @@ class StudyDB:
         return sqlite3.connect(self.db_name)
 
     def init_db(self):
-        """Creates the database table if it doesn't exist."""
+        """
+        Creates the database table if it doesn't exist.
+        Includes SCHEMA MIGRATION logic to add the 'practice_data' column if it's missing.
+        """
         conn = self.connect()
         c = conn.cursor()
+        
+        # 1. CREATE TABLE IF NOT EXISTS - Use the latest schema definition
         c.execute('''
             CREATE TABLE IF NOT EXISTS projects (
                 name TEXT PRIMARY KEY,
@@ -37,10 +44,23 @@ class StudyDB:
                 notes TEXT,
                 raw_text TEXT,
                 progress INTEGER DEFAULT 0,
-                # New field to store generated Q&A/Practice to avoid regenerating every time
                 practice_data TEXT 
             )
         ''')
+
+        # 2. SCHEMA MIGRATION: Check and add the 'practice_data' column if it's missing
+        try:
+            # Try to select the new column. If the column is missing, this will raise an OperationalError.
+            c.execute("SELECT practice_data FROM projects LIMIT 1")
+        except sqlite3.OperationalError as e:
+            # Check the error message to confirm it's a "no such column" error
+            if "no such column" in str(e):
+                st.warning("Performing database migration: Adding 'practice_data' column.")
+                c.execute("ALTER TABLE projects ADD COLUMN practice_data TEXT DEFAULT '{}'")
+            else:
+                # Re-raise other unexpected OperationalErrors
+                raise e 
+        
         conn.commit()
         conn.close()
 
@@ -61,6 +81,7 @@ class StudyDB:
         if not project_data or 'practice_data' not in project_data:
             return
 
+        # Safely load existing practice data, defaulting to an empty dict
         practice_dict = json.loads(project_data.get('practice_data') or "{}")
         practice_dict[key] = content
         
@@ -85,22 +106,22 @@ class StudyDB:
         """Fetches the full details of a specific project."""
         conn = self.connect()
         c = conn.cursor()
-        c.execute("SELECT * FROM projects WHERE name=?", (name,))
+        # Ensure we select all columns, including the new one
+        c.execute("SELECT name, level, notes, raw_text, progress, practice_data FROM projects WHERE name=?", (name,))
         row = c.fetchone()
         conn.close()
         if row:
-            # Assuming the order is: name, level, notes, raw_text, progress, practice_data
             return {
                 "name": row[0],
                 "level": row[1],
                 "notes": row[2],
                 "raw_text": row[3],
                 "progress": row[4],
-                "practice_data": row[5] # New field
+                "practice_data": row[5] 
             }
         return None
 
-db = StudyDB()
+db = StudyDB() # Initialize DB
 
 # --- SESSION STATE ---
 if 'current_project' not in st.session_state:
@@ -108,9 +129,12 @@ if 'current_project' not in st.session_state:
 if 'theory_marks' not in st.session_state:
     st.session_state.theory_marks = 5
 
-# --- HELPER FUNCTIONS (UNCHANGED) ---
+# --- HELPER FUNCTIONS ---
 
 def extract_content_text_only(uploaded_file):
+    """
+    Extracts text from a PDF file using PyMuPDF (text-only extraction for Groq's LLMs).
+    """
     uploaded_file.seek(0)
     doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
     full_content = ""
@@ -188,7 +212,8 @@ def generate_qna(notes, q_type, marks, client):
         
     system_prompt = f"You are a study guide generator. Your task is to analyze the provided study notes and generate {q_type_text} The output must be pure markdown."
     
-    prompt = f"{system_prompt}\n\nSTUDY NOTES:\n{notes}"
+    # Truncate notes for API call limit (usually around 16000 tokens for Llama 3 8k context)
+    notes_truncated = notes[:15000]
     
     try:
         with st.spinner(f"Generating {q_type} Q&A from notes..."):
@@ -196,7 +221,7 @@ def generate_qna(notes, q_type, marks, client):
                 model="llama3-70b-8192",
                 messages=[
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": f"Generate Q&A based on the following notes: {notes[:15000]}..."} # Truncate for prompt limit
+                    {"role": "user", "content": f"Generate Q&A based on the following notes: {notes_truncated}"}
                 ],
                 temperature=0.5
             )
@@ -209,13 +234,15 @@ def generate_practice_drills(notes, client):
     
     system_prompt = "You are a quiz master. Generate the following content based on the study notes: 5 Multiple Choice Questions (MCQs) with 4 options and the correct answer clearly marked. 5 Fill-in-the-Blank questions. 5 True or False questions. Clearly label each section (MCQS, FILL IN THE BLANKS, TRUE/FALSE). Provide all answers in a separate 'ANSWERS' section at the end. Output must be pure markdown."
     
+    notes_truncated = notes[:15000]
+
     try:
         with st.spinner("Generating mixed practice drills..."):
             completion = client.chat.completions.create(
                 model="llama3-70b-8192",
                 messages=[
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": f"Generate practice drills based on the following notes: {notes[:15000]}..."} # Truncate for prompt limit
+                    {"role": "user", "content": f"Generate practice drills based on the following notes: {notes_truncated}"}
                 ],
                 temperature=0.7
             )
@@ -223,23 +250,30 @@ def generate_practice_drills(notes, client):
     except Exception as e:
         return f"Error generating practice drills: {e}"
 
-# --- SIDEBAR (NAVIGATION - UNCHANGED) ---
+# --- SIDEBAR (NAVIGATION) ---
 with st.sidebar:
     st.title("🗂️ My Library")
     
+    # API Key Handling (using st.secrets or input fallback)
+    api_key_configured = False
     if "GROQ_API_KEY" in st.secrets:
         st.success("API Key Loaded from Secrets.")
         api_key_configured = True
     else:
-        # Fallback for local testing if user didn't set secrets
-        api_key_input = st.text_input("Groq API Key (If no secrets set)", type="password")
-        if api_key_input:
-            st.secrets["GROQ_API_KEY"] = api_key_input # Only for the session, not a true fix
-            st.success("Ready!")
-            api_key_configured = True
-        else:
-            api_key_configured = False
-    
+        # Fallback for local testing
+        with st.expander("⚙️ Settings: Groq API Key", expanded=True):
+            api_key_input = st.text_input("Groq API Key (Set in Secrets for deployment)", type="password")
+            if api_key_input:
+                st.secrets["GROQ_API_KEY"] = api_key_input
+                st.session_state.api_key_configured = True
+                api_key_configured = True
+                st.success("Ready!")
+            elif st.session_state.get('api_key_configured'):
+                # Key was set earlier in session
+                api_key_configured = True
+                st.success("API Key is configured.")
+
+
     st.divider()
     
     saved_projects = db.load_all_projects()
@@ -262,15 +296,15 @@ if not api_key_configured:
     st.stop()
     
 try:
-    client = Groq(api_key=st.secrets.get("GROQ_API_KEY") or st.secrets["GROQ_API_KEY"]) # Handles both dynamic input and secrets file
+    # Initialize Groq client securely
+    client = Groq(api_key=st.secrets.get("GROQ_API_KEY"))
 except Exception as e:
     st.error(f"Error initializing Groq client: {e}")
     st.stop()
 
 
-# VIEW 1: CREATE NEW PROJECT (UNCHANGED)
+# VIEW 1: CREATE NEW PROJECT
 if st.session_state.current_project is None:
-    # ... (Omitted for brevity, this section remains the same as the corrected code)
     st.title("🚀 New Study Project")
     st.markdown("### Upload a document to add it to your library.")
     
@@ -341,7 +375,8 @@ else:
                     if st.button("Generate Short Answer (5 Qs)", key="btn_short"):
                         qna_content = generate_qna(project_data['notes'], "short", 0, client)
                         db.update_practice_data(project_data['name'], "short_qna", qna_content)
-                        st.session_state.short_qna = qna_content # Update session state to display
+                        st.session_state.qna_display_key = "short_qna"
+                        st.session_state.qna_content = qna_content
                         st.rerun()
                 
                 # --- LONG ANSWER ---
@@ -349,29 +384,40 @@ else:
                     if st.button("Generate Long Answer (3 Qs)", key="btn_long"):
                         qna_content = generate_qna(project_data['notes'], "long", 0, client)
                         db.update_practice_data(project_data['name'], "long_qna", qna_content)
-                        st.session_state.long_qna = qna_content
+                        st.session_state.qna_display_key = "long_qna"
+                        st.session_state.qna_content = qna_content
                         st.rerun()
 
                 # --- CUSTOM ANSWER ---
+                custom_key = f"custom_qna_{st.session_state.theory_marks}"
                 with col_custom:
                     st.session_state.theory_marks = st.number_input("Custom Mark Value", min_value=1, max_value=25, value=st.session_state.theory_marks, key="mark_input")
                     if st.button(f"Generate Custom ({st.session_state.theory_marks} Marks)", key="btn_custom"):
                         qna_content = generate_qna(project_data['notes'], "custom", st.session_state.theory_marks, client)
-                        db.update_practice_data(project_data['name'], f"custom_qna_{st.session_state.theory_marks}", qna_content)
-                        st.session_state.custom_qna = qna_content
+                        db.update_practice_data(project_data['name'], custom_key, qna_content)
+                        st.session_state.qna_display_key = custom_key
+                        st.session_state.qna_content = qna_content
                         st.rerun()
 
                 st.divider()
 
-                # Display Generated Content (prioritize custom, then long, then short)
-                if 'custom_qna' in st.session_state:
-                    st.markdown(st.session_state.custom_qna)
-                elif 'long_qna' in st.session_state:
-                    st.markdown(st.session_state.long_qna)
-                elif 'short_qna' in st.session_state:
-                    st.markdown(st.session_state.short_qna)
-                elif practice_data.get('short_qna'):
-                     st.markdown(practice_data.get('short_qna'))
+                # Display Logic
+                display_content = ""
+                display_key = st.session_state.get('qna_display_key')
+
+                if display_key:
+                    # Prioritize content generated in the current session
+                    display_content = st.session_state.get('qna_content')
+                
+                if not display_content and display_key in practice_data:
+                    # Fallback to content saved in the database
+                    display_content = practice_data[display_key]
+                elif not display_content:
+                    # Fallback to showing the latest saved content (in case of rerun)
+                    display_content = practice_data.get(f"custom_qna_{st.session_state.theory_marks}") or practice_data.get("long_qna") or practice_data.get("short_qna")
+
+                if display_content:
+                    st.markdown(display_content)
                 else:
                     st.info("Select a generation type above to create your Theory Q&A!")
 
