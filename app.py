@@ -65,7 +65,7 @@ class StudyDB:
     def init_db(self):
         """
         Creates the database table if it doesn't exist and handles schema migration
-        for 'practice_data' and the NEW 'analogy_data' column.
+        for 'practice_data', 'analogy_data', and the NEW 'exam_analysis' column.
         """
         conn = self.connect()
         c = conn.cursor()
@@ -79,12 +79,13 @@ class StudyDB:
                 raw_text TEXT,
                 progress INTEGER DEFAULT 0,
                 practice_data TEXT,
-                analogy_data TEXT 
+                analogy_data TEXT,
+                exam_analysis TEXT
             )
         ''')
 
         # 2. SCHEMA MIGRATION: Check and add columns
-        for col_name in ['practice_data', 'analogy_data']:
+        for col_name in ['practice_data', 'analogy_data', 'exam_analysis']:
             try:
                 c.execute(f"SELECT {col_name} FROM projects LIMIT 1")
             except sqlite3.OperationalError as e:
@@ -97,19 +98,19 @@ class StudyDB:
         conn.commit()
         conn.close()
 
-    def save_project(self, name, level, notes, raw_text, practice_data="{}", analogy_data="{}"):
+    def save_project(self, name, level, notes, raw_text, practice_data="{}", analogy_data="{}", exam_analysis="{}"):
         """Saves a new project or updates an existing one."""
         conn = self.connect()
         c = conn.cursor()
         c.execute('''
-            INSERT OR REPLACE INTO projects (name, level, notes, raw_text, progress, practice_data, analogy_data)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (name, level, notes, raw_text, 0, practice_data, analogy_data))
+            INSERT OR REPLACE INTO projects (name, level, notes, raw_text, progress, practice_data, analogy_data, exam_analysis)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (name, level, notes, raw_text, 0, practice_data, analogy_data, exam_analysis))
         conn.commit()
         conn.close()
 
     def update_project_json_field(self, name, field_name, key, content):
-        """Updates a specific key within a JSON field (e.g., practice_data or analogy_data)."""
+        """Updates a specific key within a JSON field (e.g., practice_data, analogy_data, or exam_analysis)."""
         project_data = self.get_project_details(name)
         if not project_data or field_name not in project_data:
             return
@@ -131,6 +132,9 @@ class StudyDB:
         
     def update_analogy_data(self, name, key, content):
         return self.update_project_json_field(name, 'analogy_data', key, content)
+        
+    def update_exam_analysis_data(self, name, key, content):
+        return self.update_project_json_field(name, 'exam_analysis', key, content)
 
 
     def load_all_projects(self):
@@ -146,8 +150,8 @@ class StudyDB:
         """Fetches the full details of a specific project."""
         conn = self.connect()
         c = conn.cursor()
-        # Ensure we select all columns
-        c.execute("SELECT name, level, notes, raw_text, progress, practice_data, analogy_data FROM projects WHERE name=?", (name,))
+        # Ensure we select all columns, including the new 'exam_analysis'
+        c.execute("SELECT name, level, notes, raw_text, progress, practice_data, analogy_data, exam_analysis FROM projects WHERE name=?", (name,))
         row = c.fetchone()
         conn.close()
         if row:
@@ -158,7 +162,8 @@ class StudyDB:
                 "raw_text": row[3],
                 "progress": row[4],
                 "practice_data": row[5],
-                "analogy_data": row[6]
+                "analogy_data": row[6],
+                "exam_analysis": row[7] # New field
             }
         return None
         
@@ -213,6 +218,8 @@ if 'user_answers' not in st.session_state:
     st.session_state.user_answers = {}
 if 'quiz_type' not in st.session_state:
     st.session_state.quiz_type = 'general'
+if 'exam_analysis_text' not in st.session_state:
+    st.session_state.exam_analysis_text = None
 
 
 # --- HELPER FUNCTION FOR ROBUST JSON PARSING ---
@@ -314,9 +321,6 @@ def generate_interactive_drills(notes, client):
 
     with st.spinner("Generating general practice drills..."):
         return _attempt_quiz_generation(system_prompt, notes_truncated, client)
-
-# The generate_adaptive_drills function is REMOVED
-
         
 def generate_study_notes(raw_text, level, client):
     pages = raw_text.split("--- PAGE_BREAK ---")
@@ -374,6 +378,40 @@ def generate_qna(notes, q_type, marks, client):
         return completion.choices[0].message.content
     except Exception as e:
         return f"Error generating Q&A: {e}"
+        
+def analyze_past_papers(paper_content, notes, client):
+    """Analyzes past paper content against the study notes to find key topics and repeated questions."""
+    system_prompt = """You are an expert exam analyst. Your task is to analyze a collection of past exam questions and generate a detailed study plan for the student.
+
+    Output must be in clear, actionable Markdown format, focusing on:
+    
+    1.  **Top 5 Most Important Topics:** Extract the 5 concepts/topics that appear most frequently or are tested with the most depth. Rank them 1 to 5.
+    2.  **Repeated Question Themes:** Identify questions that, while phrased differently, are essentially testing the same core information (e.g., "Explain X" and "What are the characteristics of X"). List 3-5 distinct themes.
+    3.  **High-Level Strategy:** Provide a 3-point strategy for studying based on this analysis.
+
+    Notes for context: {notes}
+    
+    Analysis content: {paper_content}
+    """
+    
+    # Truncate content if necessary for the LLM context limit
+    content_truncated = paper_content[:10000]
+    notes_truncated = notes[:5000]
+
+    try:
+        with st.spinner("Analyzing past papers for trends and important topics..."):
+            completion = client.chat.completions.create(
+                model=GROQ_MODEL, 
+                messages=[
+                    {"role": "system", "content": system_prompt.format(notes=notes_truncated, paper_content=content_truncated)},
+                    {"role": "user", "content": "Perform the exam analysis and output the results as described."}
+                ],
+                temperature=0.4
+            )
+        return completion.choices[0].message.content
+    except Exception as e:
+        return f"Error performing exam analysis: {e}"
+
 
 # --- UI INTERACTIVE LOGIC ---
 
@@ -657,6 +695,7 @@ with st.sidebar:
                 st.session_state.user_answers = {} 
                 st.session_state.quiz_data = None 
                 st.session_state.quiz_type = 'general' 
+                st.session_state.exam_analysis_text = None # Reset analysis state
                 st.rerun()
         st.markdown("---")
                 
@@ -704,7 +743,8 @@ if st.session_state.current_project is None:
                     default_analogies = generate_analogies(notes, client)
 
                 analogy_data = json.dumps({"default": default_analogies})
-                db.save_project(project_name, level, notes, raw_text, analogy_data=analogy_data)
+                # Save the new exam_analysis field as empty JSON
+                db.save_project(project_name, level, notes, raw_text, analogy_data=analogy_data, exam_analysis="{}")
                 
                 st.session_state.current_project = project_name
                 st.success("✅ Project created, notes and analogies generated!")
@@ -721,6 +761,7 @@ else:
     if project_data:
         practice_data = json.loads(project_data.get('practice_data') or "{}")
         analogy_data = json.loads(project_data.get('analogy_data') or "{}")
+        exam_analysis_data = json.loads(project_data.get('exam_analysis') or "{}") # Load analysis data
 
         # Header
         col_header, col_btn = st.columns([3, 1])
@@ -732,8 +773,8 @@ else:
 
         st.markdown("---")
 
-        # Tabs for Tools
-        tab1, tab_analogy, tab2, tab3 = st.tabs(["📖 Study Notes", "💡 Analogies & Concepts", "🧠 Practices", "📊 Progress Tracker"])
+        # Tabs for Tools (Added new tab)
+        tab1, tab_analogy, tab_exam, tab2, tab3 = st.tabs(["📖 Study Notes", "💡 Analogies & Concepts", "📈 Exam Analysis", "🧠 Practices", "📊 Progress Tracker"])
         
         # --- TAB 1: STUDY NOTES ---
         with tab1:
@@ -772,6 +813,60 @@ else:
                 st.markdown(st.session_state.analogy_content)
             elif topic_request in analogy_data:
                  st.markdown(analogy_data[topic_request])
+
+        # --- TAB: EXAM ANALYSIS (NEW) ---
+        with tab_exam:
+            st.header("📈 Past Paper & Question Bank Analysis")
+            st.markdown("""
+                Upload a text file containing questions (e.g., questions copied from a PDF, or a question bank). 
+                The AI will analyze these questions against your generated notes to identify:
+                1.  **Top 5 Most Important Topics**
+                2.  **Repeated Question Themes**
+                3.  **A Focused Study Strategy**
+            """)
+            
+            uploaded_question_file = st.file_uploader("Upload .txt or .md Question File", type=["txt", "md"])
+            
+            if uploaded_question_file:
+                # Read the file content
+                question_content = uploaded_question_file.read().decode("utf-8")
+                st.info(f"Loaded **{len(question_content)}** characters of question data.")
+                
+                # Check if the content has changed or if analysis is missing
+                current_hash = hash(question_content)
+                
+                if st.button("🎯 Run Exam Analysis", type="primary"):
+                    if len(question_content.strip()) < 100:
+                         st.error("The file content is too short for meaningful analysis. Please upload more questions.")
+                    else:
+                        # Run the analysis
+                        analysis_result = analyze_past_papers(question_content, project_data['notes'], client)
+                        
+                        # Store the result and the hash of the file content used for analysis
+                        analysis_key = f"analysis_{current_hash}"
+                        db.update_exam_analysis_data(project_data['name'], analysis_key, analysis_result)
+                        
+                        st.session_state.exam_analysis_text = analysis_result
+                        st.session_state.exam_analysis_key = analysis_key
+                        st.rerun()
+
+            st.divider()
+            
+            # Display stored or generated analysis
+            analysis_to_display = st.session_state.get('exam_analysis_text')
+            
+            if not analysis_to_display:
+                # Attempt to load the last stored analysis if the session state is empty
+                last_key = next(iter(exam_analysis_data.keys()), None)
+                if last_key:
+                    analysis_to_display = exam_analysis_data.get(last_key)
+                    st.session_state.exam_analysis_text = analysis_to_display # Keep it in session state
+            
+            if analysis_to_display:
+                st.subheader("AI Exam Analysis Report")
+                st.markdown(analysis_to_display)
+            else:
+                st.info("Upload a question bank or past paper and click 'Run Exam Analysis' to generate a report.")
 
 
         # --- TAB 2: PRACTICES ---
