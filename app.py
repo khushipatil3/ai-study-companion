@@ -6,47 +6,55 @@ import base64
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="AI Study Companion", page_icon="🎓", layout="wide")
 
-st.title("🎓 AI Study Companion")
-st.markdown("### Turn any lecture PDF into adaptive study notes.")
+# --- CUSTOM CSS (Clean up the UI) ---
+# This hides the default "Manage App" menu to make it look cleaner
+st.markdown("""
+<style>
+    .reportview-container {
+        margin-top: -2em;
+    }
+    #MainMenu {visibility: hidden;}
+    .stDeployButton {display:none;}
+    footer {visibility: hidden;}
+</style>
+""", unsafe_allow_html=True)
 
-# --- SIDEBAR ---
-with st.sidebar:
-    st.header("⚙️ Settings")
-    api_key = st.text_input("Enter Groq API Key:", type="password")
-    st.info("Get a free key at console.groq.com")
-    
-    st.divider()
-    st.success("👁️ Vision Mode is ACTIVE")
-    st.caption("Scans every page as an image to capture text, diagrams, and charts.")
+# --- HEADER & SETTINGS ---
+st.title("🎓 AI Study Companion")
+st.markdown("### Upload your material, choose your depth, and start learning.")
+
+# We hide the API key in an expander to keep the UI clean
+with st.expander("⚙️ System Settings (API Key)", expanded=False):
+    api_key = st.text_input("Groq API Key:", type="password", help="Enter your key from console.groq.com")
+    st.info("ℹ️ Vision Mode is active by default. The AI will scan diagrams and charts.")
 
 # --- LOGIC FUNCTIONS ---
 
 def encode_image(pix):
-    """Converts a PyMuPDF Pixmap into a base64 string for the API"""
     return base64.b64encode(pix.tobytes()).decode('utf-8')
 
 def extract_content_with_vision(uploaded_file, client):
     """
-    Scans every page as an image using Llama 4 Scout.
+    Scans pages as images (Vision Mode) to capture all details.
     """
     doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
     full_content = ""
     
-    status_text = st.empty()
-    progress_bar = st.progress(0)
+    # Create a container for progress updates
+    progress_container = st.empty()
+    bar = st.progress(0)
+    
     total_pages = len(doc)
     
     for i, page in enumerate(doc):
-        progress = (i + 1) / total_pages
-        progress_bar.progress(progress)
-        status_text.text(f"👁️ Scanning Page {i+1}/{total_pages}...")
+        # Update progress
+        bar.progress((i + 1) / total_pages)
+        progress_container.caption(f"👁️ Scanning Page {i+1} of {total_pages}...")
 
         try:
-            # 2x Zoom for better clarity on diagrams
             pix = page.get_pixmap(matrix=fitz.Matrix(2, 2)) 
             img_str = encode_image(pix)
             
-            # Send to Llama 4 Scout
             chat_completion = client.chat.completions.create(
                 messages=[
                     {
@@ -66,60 +74,80 @@ def extract_content_with_vision(uploaded_file, client):
             )
             
             page_text = chat_completion.choices[0].message.content
-            # Add a clear delimiter for splitting later
             full_content += f"\n--- PAGE_BREAK ---\n{page_text}\n"
             
         except Exception as e:
-            st.error(f"❌ Error scanning page {i+1}: {e}")
             full_content += f"\n--- PAGE_BREAK ---\n(Error reading page {i+1})\n"
 
-    status_text.success("✅ Scanning Complete!")
-    progress_bar.empty()
+    # Cleanup progress bars
+    progress_container.empty()
+    bar.empty()
     return full_content
 
-def generate_study_notes(raw_text, client):
+def get_system_prompt(level):
     """
-    Split text into batches to avoid Token Limits, then combine results.
+    Returns specific instructions based on the user's selected difficulty.
     """
+    if level == "Basic (Quick Summary)":
+        return """
+        Act as a Tutor creating a 'Crash Course' guide.
+        GOAL: The student just wants to pass the exam.
+        1. **Keep it simple:** Focus only on high-level definitions and core concepts.
+        2. **Brevity:** Use bullet points and short paragraphs.
+        3. **Outlines:** Create clear outlines of the chapters.
+        4. **Visuals:** Add 
+
+[Image of X]
+ tags only for the most critical diagrams.
+        """
+    elif level == "Intermediate (Detailed Notes)":
+        return """
+        Act as an expert Professor. Create a comprehensive study guide.
+        GOAL: The student wants a solid B+ or A grade.
+        1. **Format:** Use clear Markdown headers (## Topic).
+        2. **Structure:** Explain concepts clearly with definitions and process steps.
+        3. **Exam Tips:** Include specific "Exam Strategy" boxes.
+        4. **Visuals:** Insert 
+
+[Image of X]
+ tags for every relevant concept or flowchart.
+        """
+    else:  # Advanced
+        return """
+        Act as a Subject Matter Expert and Researcher.
+        GOAL: The student wants to master the subject (Top 1%).
+        1. **Depth:** Dive deep into every nuance. Explain 'Why' and 'How', not just 'What'.
+        2. **Context:** Add information *outside* the text if it helps understanding (e.g., real-world applications).
+        3. **Connections:** Link concepts together to show the bigger picture.
+        4. **Visuals:** Insert  tags frequently.
+        """
+
+def generate_study_notes(raw_text, level, client):
     if not raw_text: return "⚠️ Error: No content extracted."
 
-    # 1. SPLIT CONTENT BY PAGES
-    # We use the delimiter we added during extraction
     pages = raw_text.split("--- PAGE_BREAK ---")
-    
-    # 2. CREATE BATCHES (e.g., 15 pages per batch)
-    # This ensures the AI doesn't get overwhelmed
     batch_size = 15 
     batches = [pages[i:i + batch_size] for i in range(0, len(pages), batch_size)]
     
-    final_notes = "# 📘 Comprehensive Study Guide\n\n"
+    final_notes = f"# 📘 {level} Study Guide\n\n"
     
-    progress_text = st.empty()
+    status_text = st.empty()
     bar = st.progress(0)
     
+    # Get the specific instructions for the chosen level
+    system_instructions = get_system_prompt(level)
+    
     for i, batch in enumerate(batches):
-        progress = (i + 1) / len(batches)
-        bar.progress(progress)
-        progress_text.text(f"🧠 Synthesizing Batch {i+1}/{len(batches)}...")
+        bar.progress((i + 1) / len(batches))
+        status_text.caption(f"🧠 Synthesizing Batch {i+1}/{len(batches)}...")
         
         batch_content = "\n".join(batch)
         
         prompt = f"""
-        Act as an expert Professor. Create detailed study notes for this section of the course.
+        {system_instructions}
         
         CONTENT TO PROCESS:
         {batch_content}
-        
-        INSTRUCTIONS:
-        1. **Format:** Use clear Markdown headers (## Topic).
-        2. **Visuals:** If the text mentions a complex concept (like 'Mitosis', 'Architecture', 'Flowchart'), insert a tag like
- immediately after the concept. 
-           - Example: "Data cleaning involves removing noise. 
-
-[Image of Data Cleaning Process Flowchart]
-"
-        3. **Detail:** Do not skip sections. Explain every concept found in the content.
-        4. **Tables:** If there is tabular data, format it as a Markdown table.
         
         Output strictly Markdown.
         """
@@ -135,73 +163,52 @@ def generate_study_notes(raw_text, client):
         except Exception as e:
             final_notes += f"\n\n(Error processing batch {i+1}: {e})\n\n"
             
-    progress_text.empty()
+    status_text.empty()
     bar.empty()
     return final_notes
 
-def generate_quiz(raw_text, client):
-    """
-    Generates a quiz based on a random sample of the text to avoid limits.
-    """
-    # Take the first 15000 chars roughly (Introduction + Unit 1)
-    # Sending 113 pages for a quiz is too much context
-    sample_text = raw_text[:20000] 
-    
-    prompt = f"""
-    Create 10 Multiple Choice Questions (MCQs) based on this text.
-    Format the output so the answer is hidden or at the bottom.
-    TEXT: {sample_text}
-    """
-    try:
-        completion = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.5, 
-        )
-        return completion.choices[0].message.content
-    except Exception as e:
-        return f"❌ Quiz Error: {str(e)}"
+# --- MAIN UI FLOW ---
 
-# --- MAIN UI ---
-
+# 1. STOP if no API Key
 if not api_key:
-    st.warning("⚠️ Please enter your Groq API Key in the sidebar to start.")
+    st.warning("Please enter your API Key in the 'Settings' above to proceed.")
     st.stop()
 
-# Initialize Client
-try:
-    client = Groq(api_key=api_key)
-except Exception as e:
-    st.error(f"Invalid API Key format: {e}")
-    st.stop()
+client = Groq(api_key=api_key)
 
-uploaded_file = st.file_uploader("📂 Upload your Lecture PDF", type="pdf")
+# 2. File Upload Area
+st.divider()
+uploaded_file = st.file_uploader("📂 Step 1: Upload your Document", type="pdf")
 
 if uploaded_file:
-    if st.button("🚀 Generate Study Guide"):
+    # 3. Detail Selection (Only shows after upload)
+    st.write("### 🎚️ Step 2: Choose your Detail Level")
+    
+    level = st.radio(
+        "How deep should we go?",
+        ["Basic (Quick Summary)", "Intermediate (Detailed Notes)", "Advanced (Mastery & Context)"],
+        index=1, # Default to Intermediate
+        horizontal=True
+    )
+    
+    # 4. Generate Button
+    if st.button("🚀 Generate Notes"):
         
-        # 1. Extract (Vision Mode)
+        # A. Extract
         content = extract_content_with_vision(uploaded_file, client)
         
         if len(content) < 50:
-            st.error("⚠️ No content found. The PDF might be blank.")
+            st.error("⚠️ No content found.")
         else:
-            # 2. Create Tabs for Output
-            tab1, tab2, tab3 = st.tabs(["📘 Study Notes", "📝 Practice Quiz", "🔍 Raw Transcription"])
+            # B. Generate based on Level
+            notes = generate_study_notes(content, level, client)
             
-            # 3. Generate Final Output
-            # Note: We run these sequentially now to handle the progress bars correctly
-            notes = generate_study_notes(content, client)
-            quiz = generate_quiz(content, client)
+            # C. Display
+            st.success("✨ Generation Complete!")
+            st.markdown(notes)
+            st.download_button("Download Notes (.md)", notes, file_name=f"{level.split()[0]}_Notes.md")
             
-            with tab1:
-                st.markdown(notes)
-                st.download_button("Download Notes (.md)", notes, file_name="Vision_Notes.md")
-                
-            with tab2:
-                st.subheader("Test Your Knowledge")
-                st.markdown(quiz)
-                
-            with tab3:
-                st.info("This is what the AI 'saw' on your pages:")
-                st.text_area("Raw Vision Output", content, height=400)
+            # Placeholder for future features (Sidebar will populate here later)
+            with st.sidebar:
+                st.header("Tools")
+                st.info("Quiz & Flashcards coming in next update!")
