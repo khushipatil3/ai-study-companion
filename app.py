@@ -222,6 +222,8 @@ if 'exam_analysis_text' not in st.session_state:
     st.session_state.exam_analysis_text = None
 if 'exam_analysis_pdf_content' not in st.session_state: # NEW: Store extracted text from the PDF uploaded for analysis
     st.session_state.exam_analysis_pdf_content = ""
+if 'last_uploaded_exam_pdf_id' not in st.session_state:
+    st.session_state.last_uploaded_exam_pdf_id = None
 
 
 # --- HELPER FUNCTION FOR ROBUST JSON PARSING ---
@@ -704,6 +706,7 @@ with st.sidebar:
                 st.session_state.quiz_type = 'general' 
                 st.session_state.exam_analysis_text = None 
                 st.session_state.exam_analysis_pdf_content = "" 
+                st.session_state.last_uploaded_exam_pdf_id = None
                 st.rerun()
         st.markdown("---")
                 
@@ -830,22 +833,28 @@ else:
                 The AI will analyze the **extracted text** from the PDF to identify key trends and repeated questions.
             """)
             
-            uploaded_pdf = st.file_uploader("Upload Past Paper PDF", type="pdf")
+            uploaded_pdf = st.file_uploader("Upload Past Paper PDF", type="pdf", key="exam_pdf_uploader")
             
+            # Store extracted content only if a file is uploaded
             if uploaded_pdf:
-                # 1. Extract Text
-                with st.spinner("Extracting text from PDF..."):
-                    pdf_text = extract_content_text_only(uploaded_pdf)
-                
-                # Update session state with the extracted text for potential use
-                st.session_state.exam_analysis_pdf_content = pdf_text
-
-                # 2. Check Extraction Quality and Provide Guidance
-                if len(pdf_text.strip()) < 100:
-                    st.warning("⚠️ **Low Text Quality Detected.** This likely means the PDF contains scanned images of questions, which the application cannot read. The analysis will fail unless you upload a digitally created (searchable) PDF.")
+                # Check if the content has already been extracted for the current file
+                # Use the file ID as a simple way to track if extraction is needed
+                if not uploaded_pdf.file_id == st.session_state.get('last_uploaded_exam_pdf_id'):
+                    with st.spinner("Extracting text from PDF..."):
+                        pdf_text = extract_content_text_only(uploaded_pdf)
                     
-                st.info(f"Loaded **{len(pdf_text)}** characters of text for analysis.")
-                
+                    # Update session state with the extracted text and file ID
+                    st.session_state.exam_analysis_pdf_content = pdf_text
+                    st.session_state.last_uploaded_exam_pdf_id = uploaded_pdf.file_id
+                    
+                    # 2. Check Extraction Quality and Provide Guidance
+                    if len(pdf_text.strip()) < 100:
+                        st.warning("⚠️ **Low Text Quality Detected.** This likely means the PDF contains scanned images of questions, which the application cannot read. The analysis will fail unless you upload a digitally created (searchable) PDF.")
+                    st.info(f"Loaded **{len(pdf_text)}** characters of text for analysis.")
+                    
+                else:
+                    st.info(f"Using previously extracted content (**{len(st.session_state.exam_analysis_pdf_content)}** characters) from the uploaded file.")
+
                 # 3. Analysis Button
                 if st.button("🎯 Run Exam Analysis", type="primary"):
                     question_content = st.session_state.exam_analysis_pdf_content
@@ -853,8 +862,12 @@ else:
                     if len(question_content.strip()) < 100:
                         st.error("The extracted text from the PDF is too short for meaningful analysis. Please check your file.")
                     else:
-                        # Run the analysis
-                        analysis_result = analyze_past_papers(question_content, project_data['notes'], client)
+                        # Crucial Fix: Pass the current project notes as context
+                        analysis_result = analyze_past_papers(
+                            paper_content=question_content, 
+                            notes=project_data['notes'], # FIX: Use project notes as context
+                            client=client
+                        )
                         
                         # Store the result
                         current_hash = hash(question_content)
@@ -862,8 +875,12 @@ else:
                         db.update_exam_analysis_data(project_data['name'], analysis_key, analysis_result)
                         
                         st.session_state.exam_analysis_text = analysis_result
-                        st.rerun()
-
+                        st.rerun() # Rerun to display the result
+            else:
+                # Clear content if no file is present
+                st.session_state.exam_analysis_pdf_content = ""
+                st.session_state.last_uploaded_exam_pdf_id = None
+            
             st.divider()
             
             # Display stored or generated analysis
