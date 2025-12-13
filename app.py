@@ -1,13 +1,13 @@
 import streamlit as st
 import fitz # PyMuPDF
-from groq import Groq
+from groq import GroQ
 import sqlite3
 import json
 import base64 
 
 # --- MODEL CONSTANT ---
-# FIX: Replace the decommissioned model with the current Groq recommendation for 70B performance.
-GROQ_MODEL = "llama-3.1-70b-versatile" 
+# FIX: Updated model to the user's preferred choice for high speed and current availability.
+GROQ_MODEL = "llama-3.1-8b-instant" 
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="AI Study Companion", page_icon="🎓", layout="wide")
