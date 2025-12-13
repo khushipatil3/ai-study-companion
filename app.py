@@ -6,7 +6,6 @@ import sqlite3
 import json
 import re
 from datetime import date, timedelta
-import time # For the batching progress
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="AI Study Companion", page_icon="🎓", layout="wide")
@@ -37,7 +36,7 @@ st.markdown("""
         padding: 15px;
         border-radius: 5px;
         border-left: 5px solid #daa520; /* Gold color */
-        margin-top: 5px;
+        margin-top: 15px;
         margin-bottom: 10px;
         font-size: 0.95em;
     }
@@ -56,6 +55,7 @@ st.markdown("""
 def init_db():
     conn = sqlite3.connect('study_db.sqlite')
     c = conn.cursor()
+    # Updated CREATE TABLE with analogy_cache
     c.execute('''CREATE TABLE IF NOT EXISTS projects (
         name TEXT PRIMARY KEY, level TEXT, notes TEXT, raw_text TEXT, progress INTEGER DEFAULT 0, analogy_cache TEXT
     )''')
@@ -122,7 +122,33 @@ def log_quiz_result(project_name, topic, q_type, correct, confidence):
     conn.commit()
     conn.close()
 
+def get_topics_for_review(project_name):
+    """Finds topics that are due for review today or have low accuracy."""
+    conn = sqlite3.connect('study_db.sqlite')
+    c = conn.cursor()
+    today = date.today().isoformat()
+    
+    # 1. Topics due for review (based on SRS schedule)
+    srs_topics = c.execute('''
+        SELECT topic_tag FROM srs_schedule
+        WHERE project_name = ? AND next_review <= ?
+    ''', (project_name, today)).fetchall()
+    
+    # 2. Topics with lowest overall accuracy (less than 60%)
+    weak_topics = c.execute('''
+        SELECT topic_tag FROM quiz_performance
+        WHERE project_name = ?
+        GROUP BY topic_tag
+        HAVING AVG(is_correct) < 0.6
+    ''', (project_name,)).fetchall()
+    
+    conn.close()
+    
+    all_topics = set([t[0] for t in srs_topics] + [t[0] for t in weak_topics])
+    return list(all_topics)
+
 def get_topic_performance(project_name):
+    """Returns weak (<60%) and strong (>60%) topics."""
     conn = sqlite3.connect('study_db.sqlite')
     c = conn.cursor()
     c.execute('''SELECT topic_tag, AVG(is_correct) as accuracy FROM quiz_performance WHERE project_name = ? GROUP BY topic_tag ORDER BY accuracy ASC''', (project_name,))
@@ -134,12 +160,29 @@ def get_topic_performance(project_name):
     return weak, strong
 
 def get_project_details(name):
+    """
+    Fetches project details using column names for robustness (fixes the IndexError).
+    """
     conn = sqlite3.connect('study_db.sqlite')
     c = conn.cursor()
     c.execute("SELECT * FROM projects WHERE name=?", (name,))
     row = c.fetchone()
+    
+    # Get the column names to map the data correctly
+    columns = [desc[0] for desc in c.description]
     conn.close()
-    if row: return {"name": row[0], "level": row[1], "notes": row[2], "raw_text": row[3], "progress": row[4], "analogy_cache": row[5]}
+    
+    if row:
+        project_data = {
+            "name": row[columns.index("name")],
+            "level": row[columns.index("level")],
+            "notes": row[columns.index("notes")],
+            "raw_text": row[columns.index("raw_text")],
+            "progress": row[columns.index("progress")],
+            # Safely check for the new column 'analogy_cache'
+            "analogy_cache": row[columns.index("analogy_cache")] if "analogy_cache" in columns else None
+        }
+        return project_data
     return None
 
 def load_all_projects():
@@ -184,7 +227,6 @@ def generate_study_notes(raw_text, level, client):
 
 # --- BATCH ANALOGY GENERATOR ---
 def generate_batch_analogies(topic_list, client):
-    """Generates analogies for a list of topics in one efficient API call."""
     topic_string = "\n".join([f"- {topic}" for topic in topic_list])
     
     prompt = f"""
@@ -214,14 +256,11 @@ def generate_batch_analogies(topic_list, client):
 
 # --- TOPIC EXTRACTION HELPER (Pulls headers from notes) ---
 def extract_main_topics(notes_markdown):
-    """Uses regex to find main headers (##) from generated notes."""
-    # Find all level 2 headers, striping the markdown syntax
     topics = re.findall(r"^##\s+(.*)", notes_markdown, re.MULTILINE)
-    # Filter out common junk titles
     topics = [t.strip() for t in topics if t.strip() and len(t.strip()) > 5 and not t.strip().startswith(('Study Guide', 'Unit'))]
     return topics
 
-# --- QUIZ & THEORY GENERATORS (Unchanged) ---
+# --- QUIZ & THEORY GENERATORS ---
 
 def clean_json_string(json_str):
     json_str = json_str.strip()
@@ -290,7 +329,7 @@ def generate_theory_questions(raw_text, q_type, marks, num_q, client):
             messages=[{"role": "user", "content": prompt}], temperature=0.4
         )
         return completion.choices[0].message.content
-    except Exception as e: return f"Error generating theory: {str(e)}"
+    except Exception as e: return f"Error generating theory: {str(e)}"}
 
 # --- PYQ ANALYZER LOGIC ---
 def analyze_pyq_pdf(pyq_file, client):
@@ -376,8 +415,9 @@ if st.session_state.current_project is None:
 else:
     data = get_project_details(st.session_state.current_project)
     
-    if not data['raw_text'] or len(data['raw_text']) < 50:
-        st.error("⚠️ Warning: This project has no readable text. Quiz generation will fail.")
+    if not data or not data['raw_text'] or len(data['raw_text']) < 50:
+        st.error("⚠️ Error: Could not load project data or no readable text was found. Please upload a new document.")
+        st.stop() # Stop the app if data is missing
 
     st.header(f"📘 {data['name']}")
     
@@ -398,7 +438,7 @@ else:
             try:
                 cached_analogies = json.loads(data['analogy_cache'])
             except json.JSONDecodeError:
-                st.warning("Could not decode analogy cache. Regenerating.")
+                st.warning("Could not decode analogy cache. Please regenerate.")
         
         # 1. Generate/Load Core Analogies
         main_topics = extract_main_topics(data['notes'])
@@ -472,6 +512,7 @@ else:
                             st.session_state.quiz_submitted = False
                             st.session_state.user_answers = {}
             
+            # QUIZ DISPLAY LOGIC
             if st.session_state.get('quiz_data') and "questions" in st.session_state.quiz_data:
                 qs = st.session_state.quiz_data['questions']
                 
@@ -501,7 +542,7 @@ else:
                         if submitted:
                             for i in range(len(qs)):
                                 st.session_state.user_answers[i] = st.session_state.get(f"q_input_{i}")
-                                st.session_state.user_answers[f'conf_{i}'] = st.session_state.get(f"conf_{i}") # Re-save confidence value
+                                st.session_state.user_answers[f'conf_{i}'] = st.session_state.get(f"conf_{i}")
                             st.session_state.quiz_submitted = True
                             st.rerun()
 
@@ -586,7 +627,7 @@ else:
             else:
                 st.write("Take a quiz to identify your strengths.")
                 
-        st.caption("Note: The 'Generate New Quiz' button in the Practice tab will automatically prioritize your Weak Areas.")
+        st.caption("Note: Low accuracy and low confidence scores flag a topic as a Weak Area for the next quiz.")
         
     # --- TAB 5: EXAM HACKER (PYQ) ---
     with tab4:
