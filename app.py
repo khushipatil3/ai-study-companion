@@ -1,12 +1,12 @@
 import streamlit as st
 import fitz # PyMuPDF
-from groq import GroQ
+from groq import Groq # FIX: Corrected import from GroQ to Groq
 import sqlite3
 import json
 import base64 
 
 # --- MODEL CONSTANT ---
-# FIX: Updated model to the user's preferred choice for high speed and current availability.
+# Current stable Groq model for fast, high-quality responses.
 GROQ_MODEL = "llama-3.1-8b-instant" 
 
 # --- PAGE CONFIG ---
@@ -191,7 +191,7 @@ def generate_study_notes(raw_text, level, client):
         
         try:
             completion = client.chat.completions.create(
-                model=GROQ_MODEL, # FIX: Updated model
+                model=GROQ_MODEL, 
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3
             )
@@ -223,7 +223,7 @@ def generate_qna(notes, q_type, marks, client):
     try:
         with st.spinner(f"Generating {q_type} Q&A from notes..."):
             completion = client.chat.completions.create(
-                model=GROQ_MODEL, # FIX: Updated model
+                model=GROQ_MODEL, 
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": f"Generate Q&A based on the following notes: {notes_truncated}"}
@@ -244,7 +244,7 @@ def generate_practice_drills(notes, client):
     try:
         with st.spinner("Generating mixed practice drills..."):
             completion = client.chat.completions.create(
-                model=GROQ_MODEL, # FIX: Updated model
+                model=GROQ_MODEL, 
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": f"Generate practice drills based on the following notes: {notes_truncated}"}
