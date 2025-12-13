@@ -19,13 +19,10 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- DATABASE LAYER (SQLite) ---
-# This replaces the temporary session state with a permanent file 'study_db.sqlite'
-
 def init_db():
     """Creates the database table if it doesn't exist."""
     conn = sqlite3.connect('study_db.sqlite')
     c = conn.cursor()
-    # Create table to store projects
     c.execute('''
         CREATE TABLE IF NOT EXISTS projects (
             name TEXT PRIMARY KEY,
@@ -119,18 +116,19 @@ def extract_content_with_vision(uploaded_file, client):
     return full_content
 
 def get_system_prompt(level):
+    # Fixed: Using triple quotes to prevent syntax errors on multi-line strings
     if level == "Basic":
-        return "Act as a Tutor. GOAL: Pass the exam. Focus on definitions, brevity, and outlines. Add 
+        return """Act as a Tutor. GOAL: Pass the exam. Focus on definitions, brevity, and outlines. Add 
 
 [Image of X]
- tags only for critical diagrams."
+ tags only for critical diagrams."""
     elif level == "Intermediate":
-        return "Act as a Professor. GOAL: Solid understanding. Use detailed definitions, process steps, and exam tips. Insert 
+        return """Act as a Professor. GOAL: Solid understanding. Use detailed definitions, process steps, and exam tips. Insert 
 
 [Image of X]
- tags frequently."
+ tags frequently."""
     else:
-        return "Act as a Subject Matter Expert. GOAL: Mastery. Explain nuances, real-world context, and deep connections. Insert  tags for everything."
+        return """Act as a Subject Matter Expert. GOAL: Mastery. Explain nuances, real-world context, and deep connections. Insert  tags for everything."""
 
 def generate_study_notes(raw_text, level, client):
     pages = raw_text.split("--- PAGE_BREAK ---")
