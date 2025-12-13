@@ -65,7 +65,7 @@ class StudyDB:
     def init_db(self):
         """
         Creates the database table if it doesn't exist and handles schema migration
-        for 'practice_data', 'analogy_data', and the NEW 'exam_analysis' column.
+        for 'practice_data', 'analogy_data', and 'exam_analysis'.
         """
         conn = self.connect()
         c = conn.cursor()
@@ -150,7 +150,7 @@ class StudyDB:
         """Fetches the full details of a specific project."""
         conn = self.connect()
         c = conn.cursor()
-        # Ensure we select all columns, including the new 'exam_analysis'
+        # Ensure we select all columns, including 'exam_analysis'
         c.execute("SELECT name, level, notes, raw_text, progress, practice_data, analogy_data, exam_analysis FROM projects WHERE name=?", (name,))
         row = c.fetchone()
         conn.close()
@@ -163,7 +163,7 @@ class StudyDB:
                 "progress": row[4],
                 "practice_data": row[5],
                 "analogy_data": row[6],
-                "exam_analysis": row[7] # New field
+                "exam_analysis": row[7]
             }
         return None
         
@@ -220,6 +220,8 @@ if 'quiz_type' not in st.session_state:
     st.session_state.quiz_type = 'general'
 if 'exam_analysis_text' not in st.session_state:
     st.session_state.exam_analysis_text = None
+if 'exam_questions_input' not in st.session_state:
+    st.session_state.exam_questions_input = ""
 
 
 # --- HELPER FUNCTION FOR ROBUST JSON PARSING ---
@@ -761,7 +763,7 @@ else:
     if project_data:
         practice_data = json.loads(project_data.get('practice_data') or "{}")
         analogy_data = json.loads(project_data.get('analogy_data') or "{}")
-        exam_analysis_data = json.loads(project_data.get('exam_analysis') or "{}") # Load analysis data
+        exam_analysis_data = json.loads(project_data.get('exam_analysis') or "{}")
 
         # Header
         col_header, col_btn = st.columns([3, 1])
@@ -814,41 +816,53 @@ else:
             elif topic_request in analogy_data:
                  st.markdown(analogy_data[topic_request])
 
-        # --- TAB: EXAM ANALYSIS (NEW) ---
+        # --- TAB: EXAM ANALYSIS (UPDATED) ---
         with tab_exam:
             st.header("📈 Past Paper & Question Bank Analysis")
             st.markdown("""
-                Upload a text file containing questions (e.g., questions copied from a PDF, or a question bank). 
-                The AI will analyze these questions against your generated notes to identify:
-                1.  **Top 5 Most Important Topics**
-                2.  **Repeated Question Themes**
-                3.  **A Focused Study Strategy**
+                Upload a past paper PDF, and then paste the questions into the text box below. 
+                The AI needs **clean text** (not images) to analyze trends.
             """)
             
-            uploaded_question_file = st.file_uploader("Upload .txt or .md Question File", type=["txt", "md"])
+            uploaded_pdf = st.file_uploader("Upload Past Paper PDF", type="pdf")
             
-            if uploaded_question_file:
-                # Read the file content
-                question_content = uploaded_question_file.read().decode("utf-8")
-                st.info(f"Loaded **{len(question_content)}** characters of question data.")
+            if uploaded_pdf:
+                with st.spinner("Extracting text from PDF (useful for copying non-image questions)..."):
+                    pdf_text = extract_content_text_only(uploaded_pdf)
                 
-                # Check if the content has changed or if analysis is missing
-                current_hash = hash(question_content)
-                
-                if st.button("🎯 Run Exam Analysis", type="primary"):
-                    if len(question_content.strip()) < 100:
-                         st.error("The file content is too short for meaningful analysis. Please upload more questions.")
-                    else:
-                        # Run the analysis
-                        analysis_result = analyze_past_papers(question_content, project_data['notes'], client)
-                        
-                        # Store the result and the hash of the file content used for analysis
-                        analysis_key = f"analysis_{current_hash}"
-                        db.update_exam_analysis_data(project_data['name'], analysis_key, analysis_result)
-                        
-                        st.session_state.exam_analysis_text = analysis_result
-                        st.session_state.exam_analysis_key = analysis_key
-                        st.rerun()
+                # Pre-fill the text area with extracted text if it looks meaningful
+                if len(pdf_text.strip()) > 50:
+                    st.session_state.exam_questions_input = pdf_text.strip()
+                    st.success("Text successfully extracted from the PDF. Review and edit the questions below.")
+                else:
+                    st.warning("Could not extract meaningful text from the PDF. It may contain scanned images. Please manually transcribe the questions below.")
+
+            st.markdown("---")
+
+            st.subheader("Questions for AI Analysis (Paste Text Here)")
+            
+            # Use the session state variable for the text area
+            question_content = st.text_area(
+                "Paste all exam questions or a representative question bank here. Must be text, not images.", 
+                value=st.session_state.exam_questions_input,
+                height=300,
+                key="exam_questions_text_area"
+            )
+            
+            if st.button("🎯 Run Exam Analysis", type="primary"):
+                if len(question_content.strip()) < 100:
+                    st.error("The pasted question bank is too short for meaningful analysis. Please input at least 10-15 questions.")
+                else:
+                    # Run the analysis
+                    analysis_result = analyze_past_papers(question_content, project_data['notes'], client)
+                    
+                    # Store the result using a hash of the content to track what was analyzed
+                    current_hash = hash(question_content)
+                    analysis_key = f"analysis_{current_hash}"
+                    db.update_exam_analysis_data(project_data['name'], analysis_key, analysis_result)
+                    
+                    st.session_state.exam_analysis_text = analysis_result
+                    st.rerun() # Rerun to display the result cleanly
 
             st.divider()
             
@@ -860,13 +874,13 @@ else:
                 last_key = next(iter(exam_analysis_data.keys()), None)
                 if last_key:
                     analysis_to_display = exam_analysis_data.get(last_key)
-                    st.session_state.exam_analysis_text = analysis_to_display # Keep it in session state
+                    st.session_state.exam_analysis_text = analysis_to_display
             
             if analysis_to_display:
                 st.subheader("AI Exam Analysis Report")
                 st.markdown(analysis_to_display)
             else:
-                st.info("Upload a question bank or past paper and click 'Run Exam Analysis' to generate a report.")
+                st.info("Upload a past paper and paste the question content into the box, then click 'Run Exam Analysis' to generate a report.")
 
 
         # --- TAB 2: PRACTICES ---
