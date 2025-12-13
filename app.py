@@ -383,10 +383,11 @@ def generate_qna(notes, q_type, marks, client):
     except Exception as e:
         return f"Error generating Q&A: {e}"
         
+# --- CRITICAL FIX IMPLEMENTATION ---
 def analyze_past_papers(paper_content, client):
     """
-    Analyzes past paper content to find key topics and repeated questions,
-    independent of the study notes.
+    Analyzes past paper content to find key topics and repeated questions.
+    This function is explicitly independent of the main study notes.
     """
     system_prompt = """You are an expert exam analyst. Your primary task is to **analyze the pattern of questions** extracted from the past exam paper content. You MUST NOT generate answers to the questions.
 
