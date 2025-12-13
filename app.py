@@ -263,6 +263,24 @@ def get_system_prompt(level):
     else: # Advanced
         return """Act as a Subject Matter Expert. GOAL: Mastery. Explain nuances, real-world context, and deep connections. Output strictly Markdown. Insert  tags for every concept that would be better understood with a visual aid, using a detailed description for X."""
 
+def _attempt_quiz_generation(system_prompt, notes_truncated, client):
+    """Internal helper to call the Groq API with given prompt and notes."""
+    try:
+        completion = client.chat.completions.create(
+            model=GROQ_MODEL, 
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Generate 10 questions in strict JSON format based on these notes: {notes_truncated}"}
+            ],
+            response_format={"type": "json_object"}, # Enforce JSON output
+            temperature=0.8 # Use 0.8 for a good mix of question types
+        )
+        return completion.choices[0].message.content
+    except Exception as e:
+        # st.error(f"Quiz generation API failed: {e}")
+        return None
+
+
 def generate_interactive_drills(notes, client):
     """Generates general interactive practice drills (MCQ, T/F) in a strict JSON format."""
     
@@ -291,57 +309,42 @@ def generate_interactive_drills(notes, client):
     """
     notes_truncated = notes[:15000]
 
-    try:
-        with st.spinner("Generating interactive practice drills with explanations..."):
-            completion = client.chat.completions.create(
-                model=GROQ_MODEL, 
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": f"Generate 10 questions in strict JSON format based on these notes: {notes_truncated}"}
-                ],
-                response_format={"type": "json_object"}, # Enforce JSON output
-                temperature=0.8
-            )
-        return completion.choices[0].message.content
-    except Exception as e:
-        st.error(f"Error generating JSON practice drills: {e}")
-        return None
+    with st.spinner("Generating interactive practice drills with explanations..."):
+        return _attempt_quiz_generation(system_prompt, notes_truncated, client)
+
 
 def generate_adaptive_drills(notes, client, weak_topics):
     """
-    Generates a quiz targeted at weak topics identified by the progress tracker.
+    Generates a quiz targeted at weak topics identified by the progress tracker, with a retry mechanism.
     """
     weak_topics_list = ", ".join(weak_topics)
-    
-    system_prompt = f"""You are an adaptive quiz master. Your primary goal is to re-test the user on their known weak areas to reinforce learning.
-    The user's identified weak topics are: {weak_topics_list}.
-    
-    Based on the notes, generate a quiz with 10 questions total, ensuring that **at least 7 of the 10 questions focus directly on these weak topics.**
-    The quiz must consist of: 5 Multiple Choice Questions (MCQs), each with 4 options (A, B, C, D). 5 True or False Questions (T/F).
-
-    Crucially, for every question, you MUST provide a 'concept_explanation'. This explanation must be a brief (1-2 sentence) summary of the core concept the question is testing, used for instant feedback.
-
-    The entire output MUST be a single JSON object. No other text, markdown, or commentary is allowed outside the JSON structure.
-
-    JSON Format MUST be exactly as specified in the general drill function.
-    """
     notes_truncated = notes[:15000]
 
-    try:
-        with st.spinner(f"Generating targeted quiz for weak topics: {weak_topics_list}..."):
-            completion = client.chat.completions.create(
-                model=GROQ_MODEL, 
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": f"Generate 10 questions in strict JSON format based on these notes. Focus heavily on: {weak_topics_list}"}
-                ],
-                response_format={"type": "json_object"}, # Enforce JSON output
-                temperature=0.7 # Slightly lower temperature for more focused Qs
-            )
-        return completion.choices[0].message.content
-    except Exception as e:
-        st.error(f"Error generating JSON adaptive drills: {e}")
-        return None
+    # --- Attempt 1: Strict Target ---
+    system_prompt_strict = f"""You are an adaptive quiz master. Your primary goal is to re-test the user on their known weak areas to reinforce learning.
+    The user's identified weak topics are: {weak_topics_list}.
+    Based on the notes, generate a quiz with 10 questions total, ensuring that **at least 7 of the 10 questions focus directly on these weak topics.**
+    The quiz must consist of: 5 Multiple Choice Questions (MCQs). 5 True or False Questions (T/F).
+    Provide 'concept_explanation' for every question. The entire output MUST be a single JSON object. Use the specified JSON format.
+    """
+    
+    with st.spinner(f"Generating targeted quiz for weak topics: {weak_topics_list} (Attempt 1/2: Strict Focus)..."):
+        quiz_content = _attempt_quiz_generation(system_prompt_strict, notes_truncated, client)
+
+    # Validate if attempt 1 was successful
+    if quiz_content and safe_json_parse(quiz_content):
+        return quiz_content
+    
+    st.warning("Targeted generation failed or returned corrupted data. Trying a more general focus to ensure a quiz is generated.")
+
+    # --- Attempt 2: Relaxed Target (Fallback) ---
+    system_prompt_relaxed = f"""You are a quiz master. Generate a quiz with 10 questions (5 MCQ, 5 T/F) based on the notes. Focus on important concepts, especially including the following: {weak_topics_list}.
+    Provide 'concept_explanation' for every question. The entire output MUST be a single JSON object. Use the specified JSON format.
+    """
+    
+    with st.spinner(f"Generating fallback quiz for weak topics: {weak_topics_list} (Attempt 2/2: Relaxed Focus)..."):
+        return _attempt_quiz_generation(system_prompt_relaxed, notes_truncated, client)
+
         
 def generate_study_notes(raw_text, level, client):
     pages = raw_text.split("--- PAGE_BREAK ---")
@@ -451,7 +454,7 @@ def display_and_grade_quiz(project_name, quiz_json_str):
     quiz_data = safe_json_parse(quiz_json_str)
     
     if quiz_data is None:
-        st.warning("Cannot display quiz. The quiz data could not be parsed correctly.")
+        st.warning("Cannot display quiz. The quiz data could not be parsed correctly. Please try generating a new quiz.")
         return
 
     questions = quiz_data.get('questions', [])
