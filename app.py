@@ -6,7 +6,7 @@ import sqlite3
 import json
 import re
 from datetime import date, timedelta
-import os # For the temporary DB fix
+# Removed: import os (No longer needed)
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="AI Study Companion", page_icon="🎓", layout="wide")
@@ -54,22 +54,9 @@ st.markdown("""
 
 # --- DATABASE LAYER ---
 def init_db():
-    # ************************************************
-    # ** TEMPORARY FIX: DELETE OLD INCOMPATIBLE DB **
-    # ************************************************
-    if os.path.exists('study_db.sqlite'):
-        try:
-            # st.error("DELETING INCOMPATIBLE DATABASE FILE...") # Uncomment for debug visibility
-            os.remove('study_db.sqlite')
-        except Exception as e:
-            # This handles cases where the file might be locked.
-            # st.error(f"Could not delete database: {e}. Attempting to proceed.")
-            pass
-    # ************************************************
-    
+    # Database initialization is now clean and stable
     conn = sqlite3.connect('study_db.sqlite')
     c = conn.cursor()
-    # Updated CREATE TABLE with analogy_cache
     c.execute('''CREATE TABLE IF NOT EXISTS projects (
         name TEXT PRIMARY KEY, level TEXT, notes TEXT, raw_text TEXT, progress INTEGER DEFAULT 0, analogy_cache TEXT
     )''')
@@ -88,10 +75,9 @@ def save_project_to_db(name, level, notes, raw_text, analogy_cache=None):
     conn = sqlite3.connect('study_db.sqlite')
     c = conn.cursor()
     
-    # Check if entry exists to preserve analogy cache if not explicitly passed
     existing = c.execute("SELECT analogy_cache FROM projects WHERE name=?", (name,)).fetchone()
     if existing and analogy_cache is None:
-        analogy_cache = existing[0] # Keep the old cache
+        analogy_cache = existing[0]
     
     c.execute('INSERT OR REPLACE INTO projects (name, level, notes, raw_text, progress, analogy_cache) VALUES (?, ?, ?, ?, ?, ?)', 
               (name, level, notes, raw_text, 0, analogy_cache))
@@ -142,13 +128,11 @@ def get_topics_for_review(project_name):
     c = conn.cursor()
     today = date.today().isoformat()
     
-    # 1. Topics due for review (based on SRS schedule)
     srs_topics = c.execute('''
         SELECT topic_tag FROM srs_schedule
         WHERE project_name = ? AND next_review <= ?
     ''', (project_name, today)).fetchall()
     
-    # 2. Topics with lowest overall accuracy (less than 60%)
     weak_topics = c.execute('''
         SELECT topic_tag FROM quiz_performance
         WHERE project_name = ?
@@ -203,7 +187,8 @@ def load_all_projects():
     c.execute("SELECT name FROM projects")
     return [row[0] for row in c.fetchall()]
 
-init_db()
+# --- DB INIT RUNS HERE ---
+# init_db()
 
 # --- HELPER FUNCTIONS (Extractors and Generators) ---
 def encode_image(pix):
@@ -342,7 +327,6 @@ def generate_theory_questions(raw_text, q_type, marks, num_q, client):
         )
         return completion.choices[0].message.content
     except Exception as e: 
-        # FIX: Corrected syntax here
         return f"Error generating theory: {str(e)}"
 
 # --- PYQ ANALYZER LOGIC ---
@@ -421,6 +405,7 @@ if st.session_state.current_project is None:
             with st.spinner("Step 2/2: Generating study notes (High Quality Model)..."):
                 notes = generate_study_notes(text, level, client)
             
+            # This is where the old project data is overwritten/created
             save_project_to_db(name, level, notes, text)
             st.session_state.current_project = name
             st.rerun()
@@ -429,8 +414,12 @@ if st.session_state.current_project is None:
 else:
     data = get_project_details(st.session_state.current_project)
     
+    # Check for missing data (This is what triggers the error message you saw)
     if not data or not data['raw_text'] or len(data['raw_text']) < 50:
-        st.error("⚠️ Error: Could not load project data or no readable text was found. Please upload a new document.")
+        st.error("⚠️ Error: Could not load project data or no readable text was found. Please click '+ New Project' and upload a new document.")
+        # Attempt to clean up the broken project if it exists
+        st.session_state.current_project = None
+        # You might need to manually delete the project from the DB here if it's permanently corrupted.
         st.stop()
 
     st.header(f"📘 {data['name']}")
