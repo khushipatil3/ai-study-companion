@@ -59,13 +59,11 @@ def init_db():
     c = conn.cursor()
     
     # --- GUARANTEED WIPE ---
-    # Delete old, incompatible tables completely before recreating.
-    # This will clear all data, ensuring a fresh start.
     c.execute("DROP TABLE IF EXISTS projects")
     c.execute("DROP TABLE IF EXISTS quiz_performance")
     c.execute("DROP TABLE IF EXISTS srs_schedule")
     
-    # Recreate all tables with the correct, latest schema (6 columns)
+    # Recreate all tables with the correct, latest schema
     c.execute('''CREATE TABLE projects (
         name TEXT PRIMARY KEY, level TEXT, notes TEXT, raw_text TEXT, progress INTEGER DEFAULT 0, analogy_cache TEXT
     )''')
@@ -81,16 +79,13 @@ def init_db():
     conn.close()
 
 def save_project_to_db(name, level, notes, raw_text, analogy_cache=None):
-    # This function is now protected because init_db ensures the schema is correct.
     conn = sqlite3.connect('study_db.sqlite')
     c = conn.cursor()
     
-    # Fetch existing cache to prevent overwriting during project updates
     existing_cache = c.execute("SELECT analogy_cache FROM projects WHERE name=?", (name,)).fetchone()
     if existing_cache and analogy_cache is None:
         analogy_cache = existing_cache[0]
 
-    # Full INSERT OR REPLACE statement for all 6 columns
     c.execute('''
         INSERT OR REPLACE INTO projects (name, level, notes, raw_text, progress, analogy_cache)
         VALUES (?, ?, ?, ?, ?, ?)
@@ -202,7 +197,6 @@ def load_all_projects():
     c.execute("SELECT name FROM projects")
     return [row[0] for row in c.fetchall()]
 
-# --- DB INIT RUNS HERE ---
 init_db()
 
 # --- HELPER FUNCTIONS (Extractors and Generators) ---
@@ -210,7 +204,6 @@ def encode_image(pix):
     return base64.b64encode(pix.tobytes()).decode('utf-8')
 
 def extract_content_with_vision(uploaded_file, client):
-    # FIX: Reset file pointer to the beginning of the stream
     uploaded_file.seek(0)
     
     doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
@@ -389,7 +382,7 @@ def generate_theory_questions(raw_text, q_type, marks, num_q, client):
         )
         return completion.choices[0].message.content
     except Exception as e: 
-        return f"Error generating theory: {str(e)}"}
+        return f"Error generating theory: {str(e)}"
 
 # --- PYQ ANALYZER LOGIC ---
 def analyze_pyq_pdf(pyq_file, client):
