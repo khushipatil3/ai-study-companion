@@ -99,6 +99,7 @@ def extract_content_with_vision(uploaded_file, client):
     return full_content
 
 def generate_study_notes(raw_text, level, client):
+    # This still uses the High-Quality 70B Model for Notes
     prompt = f"Create a comprehensive {level} study guide in Markdown based on this content: {raw_text[:25000]}"
     try:
         completion = client.chat.completions.create(
@@ -108,7 +109,7 @@ def generate_study_notes(raw_text, level, client):
         return completion.choices[0].message.content
     except: return "Error generating notes."
 
-# --- QUIZ & THEORY GENERATORS (FIXED) ---
+# --- QUIZ & THEORY GENERATORS (OPTIMIZED) ---
 
 def clean_json_string(json_str):
     """Removes markdown code blocks if the AI adds them."""
@@ -121,8 +122,10 @@ def clean_json_string(json_str):
 
 def generate_objective_quiz(raw_text, weak_topics, client):
     if not raw_text or len(raw_text) < 100:
-        return {"error": "Text too short or empty. Please re-upload PDF."}
+        return {"error": "Text too short. Please re-upload PDF."}
 
+    # OPTIMIZATION: Use smaller context & smaller model
+    context_text = raw_text[:5000]
     focus_prompt = f"Focus specifically on these weak topics: {', '.join(weak_topics)}" if weak_topics else "Cover all topics evenly."
     
     prompt = f"""
@@ -148,12 +151,12 @@ def generate_objective_quiz(raw_text, weak_topics, client):
         ]
     }}
     
-    CONTENT: {raw_text[:15000]}
-    Output ONLY valid JSON. Do not add markdown or intro text.
+    CONTENT: {context_text}
+    Output ONLY valid JSON.
     """
     try:
         completion = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="llama-3.1-8b-instant", # ✅ CHEAPER MODEL
             messages=[{"role": "user", "content": prompt}], temperature=0.5, response_format={"type": "json_object"}
         )
         content = completion.choices[0].message.content
@@ -163,10 +166,13 @@ def generate_objective_quiz(raw_text, weak_topics, client):
         return {"error": f"Quiz Generation Failed: {str(e)}"}
 
 def generate_theory_questions(raw_text, q_type, marks, client):
-    if not raw_text: return "Error: No text available to generate questions."
+    if not raw_text: return "Error: No text available."
+
+    # OPTIMIZATION: Use smaller context & smaller model
+    context_text = raw_text[:5000]
 
     length_instruction = "Answer in 2-3 sentences." if q_type == "Short" else "Answer in 2 paragraphs."
-    if q_type == "Custom": length_instruction = f"These are {marks}-mark questions. The answer should be detailed enough for a {marks}-mark exam question."
+    if q_type == "Custom": length_instruction = f"These are {marks}-mark questions. Detail matches marks."
     
     prompt = f"""
     Create 3 {q_type} Answer Theory Questions based on the text.
@@ -177,11 +183,11 @@ def generate_theory_questions(raw_text, q_type, marks, client):
     ### Q1: [Question]
     **Answer:** [Ideal Answer]
     
-    CONTENT: {raw_text[:15000]}
+    CONTENT: {context_text}
     """
     try:
         completion = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="llama-3.1-8b-instant", # ✅ CHEAPER MODEL
             messages=[{"role": "user", "content": prompt}], temperature=0.4
         )
         return completion.choices[0].message.content
@@ -206,6 +212,11 @@ with st.sidebar:
             st.session_state.quiz_data = None 
             st.rerun()
     if st.button("+ New Project"): st.session_state.current_project = None; st.rerun()
+    
+    # BACKUP BUTTON
+    if st.session_state.get('current_project'):
+        with open("study_db.sqlite", "rb") as f:
+            st.download_button("📥 Backup Library", f, "study_db.sqlite")
 
 if not st.session_state.api_key: st.warning("Enter API Key to start."); st.stop()
 client = Groq(api_key=st.session_state.api_key)
@@ -228,9 +239,8 @@ if st.session_state.current_project is None:
 else:
     data = get_project_details(st.session_state.current_project)
     
-    # Check if raw text exists, if not, warn user
     if not data['raw_text'] or len(data['raw_text']) < 50:
-        st.error("⚠️ Warning: This project has no readable text. The PDF might be blank or corrupted. Quiz generation will fail.")
+        st.error("⚠️ Warning: This project has no readable text. Quiz generation will fail.")
 
     st.header(f"📘 {data['name']}")
     
@@ -253,7 +263,6 @@ else:
                     with st.spinner("Generating adaptive questions..."):
                         q_data = generate_objective_quiz(data['raw_text'], weak_spots, client)
                         
-                        # Check for errors in generation
                         if "error" in q_data:
                             st.error(q_data["error"])
                         else:
