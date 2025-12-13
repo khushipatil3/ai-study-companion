@@ -220,8 +220,8 @@ if 'quiz_type' not in st.session_state:
     st.session_state.quiz_type = 'general'
 if 'exam_analysis_text' not in st.session_state:
     st.session_state.exam_analysis_text = None
-if 'exam_questions_input' not in st.session_state:
-    st.session_state.exam_questions_input = ""
+if 'exam_analysis_pdf_content' not in st.session_state: # NEW: Store extracted text from the PDF uploaded for analysis
+    st.session_state.exam_analysis_pdf_content = ""
 
 
 # --- HELPER FUNCTION FOR ROBUST JSON PARSING ---
@@ -391,9 +391,9 @@ def analyze_past_papers(paper_content, notes, client):
     2.  **Repeated Question Themes:** Identify questions that, while phrased differently, are essentially testing the same core information (e.g., "Explain X" and "What are the characteristics of X"). List 3-5 distinct themes.
     3.  **High-Level Strategy:** Provide a 3-point strategy for studying based on this analysis.
 
-    Notes for context: {notes}
+    Notes for context (Your study guide): {notes}
     
-    Analysis content: {paper_content}
+    Analysis content (The extracted exam questions): {paper_content}
     """
     
     # Truncate content if necessary for the LLM context limit
@@ -697,7 +697,8 @@ with st.sidebar:
                 st.session_state.user_answers = {} 
                 st.session_state.quiz_data = None 
                 st.session_state.quiz_type = 'general' 
-                st.session_state.exam_analysis_text = None # Reset analysis state
+                st.session_state.exam_analysis_text = None 
+                st.session_state.exam_analysis_pdf_content = "" # Reset analysis PDF content
                 st.rerun()
         st.markdown("---")
                 
@@ -775,7 +776,7 @@ else:
 
         st.markdown("---")
 
-        # Tabs for Tools (Added new tab)
+        # Tabs for Tools
         tab1, tab_analogy, tab_exam, tab2, tab3 = st.tabs(["📖 Study Notes", "💡 Analogies & Concepts", "📈 Exam Analysis", "🧠 Practices", "📊 Progress Tracker"])
         
         # --- TAB 1: STUDY NOTES ---
@@ -816,53 +817,47 @@ else:
             elif topic_request in analogy_data:
                  st.markdown(analogy_data[topic_request])
 
-        # --- TAB: EXAM ANALYSIS (UPDATED) ---
+        # --- TAB: EXAM ANALYSIS (FINAL REVISION) ---
         with tab_exam:
             st.header("📈 Past Paper & Question Bank Analysis")
             st.markdown("""
-                Upload a past paper PDF, and then paste the questions into the text box below. 
-                The AI needs **clean text** (not images) to analyze trends.
+                Upload a past paper or question bank PDF below.
+                The AI will analyze the **extracted text** from the PDF to identify key trends and repeated questions.
             """)
             
             uploaded_pdf = st.file_uploader("Upload Past Paper PDF", type="pdf")
             
             if uploaded_pdf:
-                with st.spinner("Extracting text from PDF (useful for copying non-image questions)..."):
+                # 1. Extract Text
+                with st.spinner("Extracting text from PDF..."):
                     pdf_text = extract_content_text_only(uploaded_pdf)
                 
-                # Pre-fill the text area with extracted text if it looks meaningful
-                if len(pdf_text.strip()) > 50:
-                    st.session_state.exam_questions_input = pdf_text.strip()
-                    st.success("Text successfully extracted from the PDF. Review and edit the questions below.")
-                else:
-                    st.warning("Could not extract meaningful text from the PDF. It may contain scanned images. Please manually transcribe the questions below.")
+                # Update session state with the extracted text for potential use
+                st.session_state.exam_analysis_pdf_content = pdf_text
 
-            st.markdown("---")
-
-            st.subheader("Questions for AI Analysis (Paste Text Here)")
-            
-            # Use the session state variable for the text area
-            question_content = st.text_area(
-                "Paste all exam questions or a representative question bank here. Must be text, not images.", 
-                value=st.session_state.exam_questions_input,
-                height=300,
-                key="exam_questions_text_area"
-            )
-            
-            if st.button("🎯 Run Exam Analysis", type="primary"):
-                if len(question_content.strip()) < 100:
-                    st.error("The pasted question bank is too short for meaningful analysis. Please input at least 10-15 questions.")
-                else:
-                    # Run the analysis
-                    analysis_result = analyze_past_papers(question_content, project_data['notes'], client)
+                # 2. Check Extraction Quality and Provide Guidance
+                if len(pdf_text.strip()) < 100:
+                    st.warning("⚠️ **Low Text Quality Detected.** This likely means the PDF contains scanned images of questions, which the application cannot read. The analysis will fail unless you upload a digitally created (searchable) PDF.")
                     
-                    # Store the result using a hash of the content to track what was analyzed
-                    current_hash = hash(question_content)
-                    analysis_key = f"analysis_{current_hash}"
-                    db.update_exam_analysis_data(project_data['name'], analysis_key, analysis_result)
+                st.info(f"Loaded **{len(pdf_text)}** characters of text for analysis.")
+                
+                # 3. Analysis Button
+                if st.button("🎯 Run Exam Analysis", type="primary"):
+                    question_content = st.session_state.exam_analysis_pdf_content
                     
-                    st.session_state.exam_analysis_text = analysis_result
-                    st.rerun() # Rerun to display the result cleanly
+                    if len(question_content.strip()) < 100:
+                        st.error("The extracted text from the PDF is too short for meaningful analysis. Please check your file.")
+                    else:
+                        # Run the analysis
+                        analysis_result = analyze_past_papers(question_content, project_data['notes'], client)
+                        
+                        # Store the result
+                        current_hash = hash(question_content)
+                        analysis_key = f"analysis_{current_hash}"
+                        db.update_exam_analysis_data(project_data['name'], analysis_key, analysis_result)
+                        
+                        st.session_state.exam_analysis_text = analysis_result
+                        st.rerun()
 
             st.divider()
             
@@ -880,7 +875,7 @@ else:
                 st.subheader("AI Exam Analysis Report")
                 st.markdown(analysis_to_display)
             else:
-                st.info("Upload a past paper and paste the question content into the box, then click 'Run Exam Analysis' to generate a report.")
+                st.info("Upload a past paper PDF and click 'Run Exam Analysis' to generate a report.")
 
 
         # --- TAB 2: PRACTICES ---
