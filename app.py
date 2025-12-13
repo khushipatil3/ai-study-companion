@@ -215,10 +215,7 @@ def extract_content_with_vision(uploaded_file, client):
 def generate_study_notes(raw_text, level, client):
     if not raw_text: return "Error: No content extracted for processing."
 
-    # Split content by the delimiter created during vision extraction
     pages = raw_text.split("--- PAGE_BREAK ---")
-    
-    # Use a small batch size for extreme stability (e.g., 5 pages per batch)
     batch_size = 5 
     batches = [pages[i:i + batch_size] for i in range(0, len(pages), batch_size)]
     
@@ -227,10 +224,11 @@ def generate_study_notes(raw_text, level, client):
     status_text = st.empty()
     bar = st.progress(0)
     
-    system_instructions = f"Act as a Professor. Create a comprehensive {level} study guide in Markdown. Use descriptive headers and relevant 
+    # FIX: Using triple quotes for the f-string ensures no SyntaxError on wrapping
+    system_instructions = f"""Act as a Professor. Create a comprehensive {level} study guide in Markdown. Use descriptive headers and relevant 
 
 [Image of X]
- tags."
+ tags."""
 
     for i, batch in enumerate(batches):
         bar.progress((i + 1) / len(batches))
@@ -249,7 +247,6 @@ def generate_study_notes(raw_text, level, client):
         
         try:
             completion = client.chat.completions.create(
-                # Use a very powerful but stable model for synthesis
                 model="llama-3.1-405b-versatile",
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3
