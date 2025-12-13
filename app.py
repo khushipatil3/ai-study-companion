@@ -1,5 +1,5 @@
 import streamlit as st
-import fitz # PyMuPDF
+import fitz # PyMuPDF for PDF processing
 from groq import Groq
 import sqlite3
 import json
@@ -89,7 +89,7 @@ class StudyDB:
                 c.execute(f"SELECT {col_name} FROM projects LIMIT 1")
             except sqlite3.OperationalError as e:
                 if "no such column" in str(e):
-                    st.warning(f"Database migration: Adding '{col_name}' column.")
+                    # st.warning(f"Database migration: Adding '{col_name}' column.")
                     c.execute(f"ALTER TABLE projects ADD COLUMN {col_name} TEXT DEFAULT '{{}}'")
                 else:
                     raise e 
@@ -215,9 +215,40 @@ if 'quiz_type' not in st.session_state:
     st.session_state.quiz_type = 'general'
 
 
+# --- HELPER FUNCTION FOR ROBUST JSON PARSING ---
+def safe_json_parse(json_str):
+    """Safely extracts and parses JSON content from a string, handling LLM noise."""
+    if not json_str:
+        return None
+    
+    # Attempt to find the clean JSON block (removes '```json' and leading/trailing noise)
+    try:
+        start_index = json_str.find('{')
+        end_index = json_str.rfind('}')
+        
+        if start_index == -1 or end_index == -1:
+            # If no curly braces found, try to parse the whole thing anyway
+            return json.loads(json_str.strip())
+
+        clean_json_str = json_str[start_index:end_index + 1]
+        # Remove markdown code fence markers if they exist
+        if clean_json_str.startswith('```json'):
+            clean_json_str = clean_json_str[len('```json'):].strip()
+        if clean_json_str.endswith('```'):
+            clean_json_str = clean_json_str[:-len('```')].strip()
+
+        return json.loads(clean_json_str)
+    
+    except json.JSONDecodeError as e:
+        # st.error(f"Failed to decode quiz JSON. LLM output was likely corrupted. Error: {e}")
+        return None
+    except Exception as e:
+        # st.error(f"An unexpected error occurred during JSON cleaning. Error: {e}")
+        return None
+
+
 # --- LLM Functions ---
 
-# Helper function to ensure images are triggered only when appropriate
 def get_system_prompt(level):
     if level == "Basic":
         return """Act as a Tutor. GOAL: Pass the exam. Focus on definitions, brevity, and outlines. Output strictly Markdown. If you see text describing a diagram, use an 
@@ -311,17 +342,77 @@ def generate_adaptive_drills(notes, client, weak_topics):
     except Exception as e:
         st.error(f"Error generating JSON adaptive drills: {e}")
         return None
+        
+def generate_study_notes(raw_text, level, client):
+    pages = raw_text.split("--- PAGE_BREAK ---")
+    pages = [p for p in pages if len(p.strip()) > 50]
+    batch_size = 15 
+    batches = [pages[i:i + batch_size] for i in range(0, len(pages), batch_size)]
+    final_notes = f"# 📘 {level} Study Guide\n\n"
+    status_text = st.empty()
+    bar = st.progress(0)
+    for i, batch in enumerate(batches):
+        bar.progress((i + 1) / len(batches))
+        status_text.caption(f"🧠 Synthesizing Batch {i+1}/{len(batches)}...")
+        prompt = f"""{get_system_prompt(level)}\nCONTENT: {"\n".join(batch)}\nOutput strictly Markdown."""
+        try:
+            completion = client.chat.completions.create(model=GROQ_MODEL, messages=[{"role": "user", "content": prompt}], temperature=0.3)
+            final_notes += completion.choices[0].message.content + "\n\n---\n\n"
+        except Exception as e:
+            final_notes += f"(Error during generation: {e})\n\n---\n\n"
+    status_text.empty()
+    bar.empty()
+    return final_notes
 
-# --- UI INTERACTIVE LOGIC (MODIFIED FOR STRICT PROGRESS TRACKING) ---
+def generate_analogies(notes, client):
+    system_prompt = """You are a creative tutor specializing in making complex scientific (Physics, Chemistry, Biology) and technical topics instantly relatable. Your task is to identify 5 key concepts from the provided study notes. For each concept, provide a detailed, clear, real-life analogy. Format the output strictly as a list of concepts and their analogies in clear Markdown. Use the format: '**[Concept Title]**' followed by 'Analogy: [The detailed analogy]'."""
+    notes_truncated = notes[:10000]
+    try:
+        with st.spinner("Generating core concepts and analogies..."):
+            completion = client.chat.completions.create(model=GROQ_MODEL, messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": f"Generate 5 analogies based on the following notes: {notes_truncated}"}], temperature=0.7)
+        return completion.choices[0].message.content
+    except Exception as e:
+        return f"Error generating analogies: {e}"
+
+def generate_specific_analogy(topic, client):
+    system_prompt = f"""You are a creative tutor. Your task is to provide a single, detailed, and clear real-life analogy for the concept: '{topic}'. The analogy must be highly relatable. Output only the analogy in clear Markdown, starting with the header '### Analogy for {topic}'."""
+    try:
+        with st.spinner(f"Generating analogy for '{topic}'..."):
+            completion = client.chat.completions.create(model=GROQ_MODEL, messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": f"Generate a detailed real-life analogy for the topic: {topic}"}], temperature=0.6)
+        return completion.choices[0].message.content
+    except Exception as e:
+        return f"Error generating analogy: {e}"
+
+def generate_qna(notes, q_type, marks, client):
+    q_type_text = ""
+    if q_type == "short":
+        q_type_text = "5 questions requiring concise, short-answer responses (approx. 50-75 words each). Format each as Q: followed by A:."
+    elif q_type == "long":
+        q_type_text = "3 questions requiring detailed, long-answer responses (approx. 150-250 words each). Format each as Q: followed by A:."
+    elif q_type == "custom":
+        q_type_text = f"5 questions suitable for an exam where each question is worth approximately {marks} marks. The length and detail should match typical answers for that mark value. Format each as Q: followed by A:."
+    system_prompt = f"You are a study guide generator. Your task is to analyze the provided study notes and generate {q_type_text} The output must be pure markdown."
+    notes_truncated = notes[:15000]
+    try:
+        with st.spinner(f"Generating {q_type} Q&A from notes..."):
+            completion = client.chat.completions.create(model=GROQ_MODEL, messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": f"Generate Q&A based on the following notes: {notes_truncated}"}], temperature=0.5)
+        return completion.choices[0].message.content
+    except Exception as e:
+        return f"Error generating Q&A: {e}"
+
+# --- UI INTERACTIVE LOGIC ---
 
 def process_and_update_progress(project_name, questions, user_answers):
     """
     Processes the quiz results, extracts concepts, and updates the database tracker.
-    Updates progress based on **any attempt**, no longer requiring total > 1.
+    Updates progress based on any attempt.
     """
     concept_scores = {} # {concept: [correct_count, total_count]}
     
-    for q in questions:
+    # Filter for valid questions before processing
+    valid_questions = [q for q in questions if isinstance(q, dict) and 'options' in q and 'id' in q and 'concept_explanation' in q]
+
+    for q in valid_questions:
         q_id = q['id']
         # Extract the core concept from the explanation string
         concept = q['concept_explanation'].split('is ')[-1].split(',')[0].strip().replace('.', '') 
@@ -341,7 +432,7 @@ def process_and_update_progress(project_name, questions, user_answers):
         if concept not in concept_scores:
             concept_scores[concept] = [0, 0]
         
-        concept_scores[concept][1] += 1 # Increment total attempts (always 1 per question in the quiz)
+        concept_scores[concept][1] += 1 # Increment total attempts
         if is_correct:
             concept_scores[concept][0] += 1 # Increment correct attempts
     
@@ -356,12 +447,14 @@ def process_and_update_progress(project_name, questions, user_answers):
 
 def display_and_grade_quiz(project_name, quiz_json_str):
     """Renders the interactive quiz, collects answers, and shows instant feedback *in-place*."""
-    try:
-        quiz_data = json.loads(quiz_json_str)
-        questions = quiz_data.get('questions', [])
-    except json.JSONDecodeError:
-        st.error("Could not parse quiz data. The model did not return valid JSON.")
+    
+    quiz_data = safe_json_parse(quiz_json_str)
+    
+    if quiz_data is None:
+        st.warning("Cannot display quiz. The quiz data could not be parsed correctly.")
         return
+
+    questions = quiz_data.get('questions', [])
 
     st.subheader(f"🎯 {quiz_data.get('quiz_title', 'Interactive Quiz')} ({st.session_state.quiz_type.capitalize()})")
     st.markdown("Select your answers and click **Submit Quiz** for instant feedback.")
@@ -371,7 +464,11 @@ def display_and_grade_quiz(project_name, quiz_json_str):
     # Render quiz form
     with st.form(key='quiz_form'):
         
-        for q in questions:
+        # Filter for valid questions to render
+        valid_questions = [q for q in questions if isinstance(q, dict) and 'options' in q and 'id' in q and 'question_text' in q and 'type' in q]
+
+        for q in valid_questions:
+            
             q_id = q['id']
             question_key = f"q_{q_id}"
             
@@ -379,7 +476,7 @@ def display_and_grade_quiz(project_name, quiz_json_str):
             with st.container():
                 st.markdown(f"**Question {q_id}:** {q['question_text']}")
                 
-                options = q['options']
+                options = q['options'] 
                 user_choice = None
 
                 # T/F questions
@@ -474,14 +571,15 @@ def display_and_grade_quiz(project_name, quiz_json_str):
 
         col_submit, col_reset = st.columns([1, 15])
         with col_submit:
+            # THIS IS THE FORM SUBMIT BUTTON
             submit_button = st.form_submit_button(label='✅ Submit Quiz', type="primary", disabled=st.session_state.quiz_submitted)
         with col_reset:
             reset_button = st.form_submit_button(label='🔄 Reset Quiz', type="secondary")
 
     if submit_button:
-        # --- NEW: PROCESS QUIZ RESULTS & UPDATE TRACKER ---
+        # --- PROCESS QUIZ RESULTS & UPDATE TRACKER ---
         if st.session_state.current_project:
-            process_and_update_progress(st.session_state.current_project, questions, user_answers)
+            process_and_update_progress(st.session_state.current_project, valid_questions, user_answers)
             
         st.session_state.quiz_submitted = True
         st.session_state.user_answers = user_answers 
@@ -494,8 +592,9 @@ def display_and_grade_quiz(project_name, quiz_json_str):
 
     if st.session_state.quiz_submitted:
         score = 0
-        total_questions = len(questions)
-        for q in questions:
+        total_valid = len(valid_questions)
+        
+        for q in valid_questions:
             user_answer = st.session_state.user_answers.get(q['id'])
             correct_answer = q['correct_answer']
             
@@ -509,16 +608,14 @@ def display_and_grade_quiz(project_name, quiz_json_str):
             if is_correct:
                 score += 1
 
-        st.success(f"## Final Score: {score}/{total_questions} 🎉")
-        if score == total_questions:
+        st.success(f"## Final Score: {score}/{total_valid} 🎉")
+        if score == total_valid:
             st.balloons()
         
     return
 
+# --- UTILITY FUNCTIONS ---
 
-# --- MAIN APP EXECUTION ---
-
-# Re-define other helper functions to keep the final output self-contained
 def extract_content_text_only(uploaded_file):
     uploaded_file.seek(0)
     doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
@@ -537,64 +634,6 @@ def extract_content_text_only(uploaded_file):
     progress_container.empty()
     bar.empty()
     return full_content
-
-def generate_study_notes(raw_text, level, client):
-    pages = raw_text.split("--- PAGE_BREAK ---")
-    pages = [p for p in pages if len(p.strip()) > 50]
-    batch_size = 15 
-    batches = [pages[i:i + batch_size] for i in range(0, len(pages), batch_size)]
-    final_notes = f"# 📘 {level} Study Guide\n\n"
-    status_text = st.empty()
-    bar = st.progress(0)
-    for i, batch in enumerate(batches):
-        bar.progress((i + 1) / len(batches))
-        status_text.caption(f"🧠 Synthesizing Batch {i+1}/{len(batches)}...")
-        prompt = f"""{get_system_prompt(level)}\nCONTENT: {"\n".join(batch)}\nOutput strictly Markdown."""
-        try:
-            completion = client.chat.completions.create(model=GROQ_MODEL, messages=[{"role": "user", "content": prompt}], temperature=0.3)
-            final_notes += completion.choices[0].message.content + "\n\n---\n\n"
-        except Exception as e:
-            final_notes += f"(Error during generation: {e})\n\n---\n\n"
-    status_text.empty()
-    bar.empty()
-    return final_notes
-
-def generate_analogies(notes, client):
-    system_prompt = """You are a creative tutor specializing in making complex scientific (Physics, Chemistry, Biology) and technical topics instantly relatable. Your task is to identify 5 key concepts from the provided study notes. For each concept, provide a detailed, clear, real-life analogy. Format the output strictly as a list of concepts and their analogies in clear Markdown. Use the format: '**[Concept Title]**' followed by 'Analogy: [The detailed analogy]'."""
-    notes_truncated = notes[:10000]
-    try:
-        with st.spinner("Generating core concepts and analogies..."):
-            completion = client.chat.completions.create(model=GROQ_MODEL, messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": f"Generate 5 analogies based on the following notes: {notes_truncated}"}], temperature=0.7)
-        return completion.choices[0].message.content
-    except Exception as e:
-        return f"Error generating analogies: {e}"
-
-def generate_specific_analogy(topic, client):
-    system_prompt = f"""You are a creative tutor. Your task is to provide a single, detailed, and clear real-life analogy for the concept: '{topic}'. The analogy must be highly relatable. Output only the analogy in clear Markdown, starting with the header '### Analogy for {topic}'."""
-    try:
-        with st.spinner(f"Generating analogy for '{topic}'..."):
-            completion = client.chat.completions.create(model=GROQ_MODEL, messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": f"Generate a detailed real-life analogy for the topic: {topic}"}], temperature=0.6)
-        return completion.choices[0].message.content
-    except Exception as e:
-        return f"Error generating analogy: {e}"
-
-def generate_qna(notes, q_type, marks, client):
-    q_type_text = ""
-    if q_type == "short":
-        q_type_text = "5 questions requiring concise, short-answer responses (approx. 50-75 words each). Format each as Q: followed by A:."
-    elif q_type == "long":
-        q_type_text = "3 questions requiring detailed, long-answer responses (approx. 150-250 words each). Format each as Q: followed by A:."
-    elif q_type == "custom":
-        q_type_text = f"5 questions suitable for an exam where each question is worth approximately {marks} marks. The length and detail should match typical answers for that mark value. Format each as Q: followed by A:."
-    system_prompt = f"You are a study guide generator. Your task is to analyze the provided study notes and generate {q_type_text} The output must be pure markdown."
-    notes_truncated = notes[:15000]
-    try:
-        with st.spinner(f"Generating {q_type} Q&A from notes..."):
-            completion = client.chat.completions.create(model=GROQ_MODEL, messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": f"Generate Q&A based on the following notes: {notes_truncated}"}], temperature=0.5)
-        return completion.choices[0].message.content
-    except Exception as e:
-        return f"Error generating Q&A: {e}"
-
 
 # --- SIDEBAR (NAVIGATION) ---
 with st.sidebar:
@@ -837,7 +876,7 @@ else:
                 # --- ADAPTIVE QUIZ ---
                 progress_tracker = json.loads(practice_data.get('progress_tracker') or "{}")
                 
-                # --- NEW: Identify Weak Topics (Accuracy < 100%)
+                # Identify Weak Topics (Accuracy < 100%)
                 weak_topics = []
                 for concept, stats in progress_tracker.items():
                     if stats['total'] > 0 and stats['correct'] / stats['total'] < 1.0: # Any incorrect answer makes it weak
@@ -859,6 +898,7 @@ else:
 
                 st.divider()
                 
+                # Load existing quiz if none is active
                 if st.session_state.quiz_data is None and practice_data.get('interactive_quiz'):
                     st.session_state.quiz_data = practice_data.get('interactive_quiz')
                     st.session_state.quiz_type = 'general'
@@ -868,7 +908,7 @@ else:
                 else:
                     st.info("Click a button above to generate a quiz.")
 
-        # --- TAB 3: PROGRESS TRACKER (Updated to use strict definitions) ---
+        # --- TAB 3: PROGRESS TRACKER ---
         with tab3:
             st.header("📊 Study Progress Tracker")
             
