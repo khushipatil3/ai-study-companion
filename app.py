@@ -575,7 +575,8 @@ def display_and_grade_quiz(project_name, quiz_json_str):
             # THIS IS THE FORM SUBMIT BUTTON
             submit_button = st.form_submit_button(label='✅ Submit Quiz', type="primary", disabled=st.session_state.quiz_submitted)
         with col_reset:
-            reset_button = st.form_submit_button(label='🔄 Reset Quiz', type="secondary')
+            # FIX: Corrected the unterminated string literal error here.
+            reset_button = st.form_submit_button(label='🔄 Reset Quiz', type="secondary")
 
     if submit_button:
         # --- PROCESS QUIZ RESULTS & UPDATE TRACKER ---
