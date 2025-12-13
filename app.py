@@ -240,10 +240,8 @@ def safe_json_parse(json_str):
         return json.loads(clean_json_str)
     
     except json.JSONDecodeError as e:
-        # st.error(f"Failed to decode quiz JSON. LLM output was likely corrupted. Error: {e}")
         return None
     except Exception as e:
-        # st.error(f"An unexpected error occurred during JSON cleaning. Error: {e}")
         return None
 
 
@@ -277,7 +275,6 @@ def _attempt_quiz_generation(system_prompt, notes_truncated, client):
         )
         return completion.choices[0].message.content
     except Exception as e:
-        # st.error(f"Quiz generation API failed: {e}")
         return None
 
 
@@ -293,7 +290,7 @@ def generate_interactive_drills(notes, client):
 
     JSON Format MUST be:
     {
-      "quiz_title": "Interactive Practice Drill",
+      "quiz_title": "Interactive Practice Drill (General)",
       "questions": [
         {
           "id": 1,
@@ -309,13 +306,14 @@ def generate_interactive_drills(notes, client):
     """
     notes_truncated = notes[:15000]
 
-    with st.spinner("Generating interactive practice drills with explanations..."):
+    with st.spinner("Generating general practice drills..."):
         return _attempt_quiz_generation(system_prompt, notes_truncated, client)
 
 
 def generate_adaptive_drills(notes, client, weak_topics):
     """
     Generates a quiz targeted at weak topics identified by the progress tracker, with a retry mechanism.
+    Returns quiz_content string or None on failure.
     """
     weak_topics_list = ", ".join(weak_topics)
     notes_truncated = notes[:15000]
@@ -325,7 +323,8 @@ def generate_adaptive_drills(notes, client, weak_topics):
     The user's identified weak topics are: {weak_topics_list}.
     Based on the notes, generate a quiz with 10 questions total, ensuring that **at least 7 of the 10 questions focus directly on these weak topics.**
     The quiz must consist of: 5 Multiple Choice Questions (MCQs). 5 True or False Questions (T/F).
-    Provide 'concept_explanation' for every question. The entire output MUST be a single JSON object. Use the specified JSON format.
+    Provide 'concept_explanation' for every question. The entire output MUST be a single JSON object.
+    JSON Format MUST match the general quiz format, but the title should be 'Interactive Practice Drill (Targeted)'.
     """
     
     with st.spinner(f"Generating targeted quiz for weak topics: {weak_topics_list} (Attempt 1/2: Strict Focus)..."):
@@ -337,12 +336,12 @@ def generate_adaptive_drills(notes, client, weak_topics):
     
     st.warning("Targeted generation failed or returned corrupted data. Trying a more general focus to ensure a quiz is generated.")
 
-    # --- Attempt 2: Relaxed Target (Fallback) ---
+    # --- Attempt 2: Relaxed Target (Fallback, still targeted) ---
     system_prompt_relaxed = f"""You are a quiz master. Generate a quiz with 10 questions (5 MCQ, 5 T/F) based on the notes. Focus on important concepts, especially including the following: {weak_topics_list}.
-    Provide 'concept_explanation' for every question. The entire output MUST be a single JSON object. Use the specified JSON format.
+    Provide 'concept_explanation' for every question. The entire output MUST be a single JSON object. Title should be 'Interactive Practice Drill (Targeted - Fallback)'.
     """
     
-    with st.spinner(f"Generating fallback quiz for weak topics: {weak_topics_list} (Attempt 2/2: Relaxed Focus)..."):
+    with st.spinner(f"Generating fallback targeted quiz (Attempt 2/2: Relaxed Focus)..."):
         return _attempt_quiz_generation(system_prompt_relaxed, notes_truncated, client)
 
         
@@ -807,7 +806,7 @@ else:
             st.header("Practice Tools")
             sub_tab1, sub_tab2 = st.tabs(["📝 Theory Q&A", "🎯 Interactive Quiz"])
             
-            with sub_tab1: # THEORY Q&A (Unchanged)
+            with sub_tab1: # THEORY Q&A 
                 st.subheader("Generate Question & Answers")
                 
                 col_short, col_long, col_custom = st.columns(3)
@@ -859,57 +858,67 @@ else:
                     st.info("Select a generation type above to create your Theory Q&A!")
 
 
-            with sub_tab2: # INTERACTIVE QUIZ (Modified to support Adaptive Quizzes)
+            with sub_tab2: # INTERACTIVE QUIZ (MODIFIED FOR SMART GENERATION)
                 st.subheader("Interactive Practice Quiz (MCQ & T/F)")
                 
-                col_general, col_adaptive = st.columns(2)
-                
-                # --- GENERAL QUIZ ---
-                with col_general:
-                    if st.button("Generate General Quiz", type="primary", key="btn_general_drills", use_container_width=True):
-                        quiz_content = generate_interactive_drills(project_data['notes'], client)
-                        if quiz_content:
-                            db.update_practice_data(project_data['name'], "interactive_quiz", quiz_content)
-                            st.session_state.quiz_data = quiz_content
-                            st.session_state.quiz_submitted = False
-                            st.session_state.user_answers = {}
-                            st.session_state.quiz_type = 'general'
-                            st.rerun()
-                
-                # --- ADAPTIVE QUIZ ---
                 progress_tracker = json.loads(practice_data.get('progress_tracker') or "{}")
                 
                 # Identify Weak Topics (Accuracy < 100%)
                 weak_topics = []
                 for concept, stats in progress_tracker.items():
-                    if stats['total'] > 0 and stats['correct'] / stats['total'] < 1.0: # Any incorrect answer makes it weak
+                    # Check for any tested concept where not all attempts were correct
+                    if stats['total'] > 0 and stats['correct'] / stats['total'] < 1.0: 
                         weak_topics.append(concept)
                 
-                with col_adaptive:
+                # --- SINGLE SMART GENERATION BUTTON ---
+                
+                button_label = "🧠 Generate Adaptive Quiz (Focus on Weak Points)" if weak_topics else "Generate New General Quiz"
+                button_type = "primary" if weak_topics else "secondary"
+                
+                st.info(f"The system will automatically generate a quiz targeted at your weak points ({len(weak_topics)}) if available, otherwise a general quiz.")
+
+                if st.button(button_label, type=button_type, key="btn_smart_drills", use_container_width=True):
+                    
+                    quiz_content = None
+                    quiz_type = 'general'
+                    
+                    # 1. Attempt Adaptive Quiz (if weak points exist)
                     if weak_topics:
-                        if st.button(f"🧠 Generate Targeted Quiz ({len(weak_topics)} Weak Areas)", key="btn_adaptive_drills", use_container_width=True):
-                            quiz_content = generate_adaptive_drills(project_data['notes'], client, weak_topics)
-                            if quiz_content:
-                                db.update_practice_data(project_data['name'], "adaptive_quiz_last", quiz_content)
-                                st.session_state.quiz_data = quiz_content
-                                st.session_state.quiz_submitted = False
-                                st.session_state.user_answers = {}
-                                st.session_state.quiz_type = 'adaptive'
-                                st.rerun()
+                        quiz_content = generate_adaptive_drills(project_data['notes'], client, weak_topics)
+                        if quiz_content and safe_json_parse(quiz_content):
+                            quiz_type = 'adaptive'
+                        else:
+                            st.error("Targeted quiz generation failed twice. Falling back to General Quiz...")
+                            quiz_content = None # Ensure it attempts general generation
+                            
+                    # 2. Fallback to General Quiz (if no weak points or adaptive failed)
+                    if quiz_content is None:
+                        quiz_content = generate_interactive_drills(project_data['notes'], client)
+                        quiz_type = 'general'
+
+                    if quiz_content:
+                        db.update_practice_data(project_data['name'], "interactive_quiz_current", quiz_content)
+                        st.session_state.quiz_data = quiz_content
+                        st.session_state.quiz_submitted = False
+                        st.session_state.user_answers = {}
+                        st.session_state.quiz_type = quiz_type
+                        st.rerun()
                     else:
-                        st.info("Attempt a quiz to unlock adaptive targeting.")
+                        st.error("Quiz generation failed completely. Please check your notes or API key.")
+
 
                 st.divider()
                 
-                # Load existing quiz if none is active
-                if st.session_state.quiz_data is None and practice_data.get('interactive_quiz'):
-                    st.session_state.quiz_data = practice_data.get('interactive_quiz')
-                    st.session_state.quiz_type = 'general'
-
+                # Load the currently active quiz
                 if st.session_state.quiz_data:
                     display_and_grade_quiz(project_data['name'], st.session_state.quiz_data)
+                elif practice_data.get('interactive_quiz_current'):
+                    # Load the last generated quiz on session rerun if no active quiz
+                    st.session_state.quiz_data = practice_data.get('interactive_quiz_current')
+                    st.session_state.quiz_type = 'adaptive' if 'Targeted' in st.session_state.quiz_data else 'general'
+                    display_and_grade_quiz(project_data['name'], st.session_state.quiz_data)
                 else:
-                    st.info("Click a button above to generate a quiz.")
+                    st.info("Click the 'Generate New Quiz' button above to start your practice.")
 
         # --- TAB 3: PROGRESS TRACKER ---
         with tab3:
