@@ -4,7 +4,6 @@ from groq import Groq
 import base64
 import sqlite3
 import json
-import random
 import re
 
 # --- PAGE CONFIG ---
@@ -20,7 +19,6 @@ st.markdown("""
     .stTabs [data-baseweb="tab-list"] { gap: 10px; }
     .stTabs [data-baseweb="tab"] { height: 50px; white-space: pre-wrap; background-color: #f0f2f6; border-radius: 4px 4px 0px 0px; gap: 1px; padding-top: 10px; padding-bottom: 10px; }
     .stTabs [aria-selected="true"] { background-color: #ffffff; }
-    .metric-card { background-color: #f9f9f9; padding: 10px; border-radius: 5px; border: 1px solid #ddd; text-align: center; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -28,29 +26,12 @@ st.markdown("""
 def init_db():
     conn = sqlite3.connect('study_db.sqlite')
     c = conn.cursor()
-    
-    # Project Table
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS projects (
-            name TEXT PRIMARY KEY,
-            level TEXT,
-            notes TEXT,
-            raw_text TEXT,
-            progress INTEGER DEFAULT 0
-        )
-    ''')
-    
-    # Quiz Performance Table (New!)
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS quiz_performance (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            project_name TEXT,
-            topic_tag TEXT,
-            question_type TEXT,
-            is_correct INTEGER,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
+    c.execute('''CREATE TABLE IF NOT EXISTS projects (
+        name TEXT PRIMARY KEY, level TEXT, notes TEXT, raw_text TEXT, progress INTEGER DEFAULT 0
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS quiz_performance (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, project_name TEXT, topic_tag TEXT, question_type TEXT, is_correct INTEGER, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+    )''')
     conn.commit()
     conn.close()
 
@@ -71,17 +52,9 @@ def log_quiz_result(project_name, topic, q_type, correct):
     conn.close()
 
 def get_weak_areas(project_name):
-    """Analyzes quiz history to find weak topics."""
     conn = sqlite3.connect('study_db.sqlite')
     c = conn.cursor()
-    # Find topics with low accuracy (< 60%)
-    c.execute('''
-        SELECT topic_tag, AVG(is_correct) as accuracy 
-        FROM quiz_performance 
-        WHERE project_name = ? 
-        GROUP BY topic_tag 
-        ORDER BY accuracy ASC
-    ''', (project_name,))
+    c.execute('''SELECT topic_tag, AVG(is_correct) as accuracy FROM quiz_performance WHERE project_name = ? GROUP BY topic_tag ORDER BY accuracy ASC''', (project_name,))
     data = c.fetchall()
     conn.close()
     return [row[0] for row in data if row[1] < 0.6]
@@ -126,7 +99,6 @@ def extract_content_with_vision(uploaded_file, client):
     return full_content
 
 def generate_study_notes(raw_text, level, client):
-    # (Same simplified logic for notes generation)
     prompt = f"Create a comprehensive {level} study guide in Markdown based on this content: {raw_text[:25000]}"
     try:
         completion = client.chat.completions.create(
@@ -136,10 +108,21 @@ def generate_study_notes(raw_text, level, client):
         return completion.choices[0].message.content
     except: return "Error generating notes."
 
-# --- QUIZ & THEORY GENERATORS ---
+# --- QUIZ & THEORY GENERATORS (FIXED) ---
+
+def clean_json_string(json_str):
+    """Removes markdown code blocks if the AI adds them."""
+    json_str = json_str.strip()
+    if json_str.startswith("```json"):
+        json_str = json_str[7:]
+    if json_str.endswith("```"):
+        json_str = json_str[:-3]
+    return json_str.strip()
 
 def generate_objective_quiz(raw_text, weak_topics, client):
-    """Generates interactive MCQs/TrueFalse based on weak areas."""
+    if not raw_text or len(raw_text) < 100:
+        return {"error": "Text too short or empty. Please re-upload PDF."}
+
     focus_prompt = f"Focus specifically on these weak topics: {', '.join(weak_topics)}" if weak_topics else "Cover all topics evenly."
     
     prompt = f"""
@@ -166,21 +149,24 @@ def generate_objective_quiz(raw_text, weak_topics, client):
     }}
     
     CONTENT: {raw_text[:15000]}
-    Output ONLY valid JSON.
+    Output ONLY valid JSON. Do not add markdown or intro text.
     """
     try:
         completion = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}], temperature=0.5, response_format={"type": "json_object"}
         )
-        return json.loads(completion.choices[0].message.content)
+        content = completion.choices[0].message.content
+        cleaned_content = clean_json_string(content)
+        return json.loads(cleaned_content)
     except Exception as e:
-        return {"questions": []}
+        return {"error": f"Quiz Generation Failed: {str(e)}"}
 
 def generate_theory_questions(raw_text, q_type, marks, client):
-    """Generates theory questions with answers."""
+    if not raw_text: return "Error: No text available to generate questions."
+
     length_instruction = "Answer in 2-3 sentences." if q_type == "Short" else "Answer in 2 paragraphs."
-    if q_type == "Custom": length_instruction = f"These are {marks}-mark questions. Adjust length accordingly."
+    if q_type == "Custom": length_instruction = f"These are {marks}-mark questions. The answer should be detailed enough for a {marks}-mark exam question."
     
     prompt = f"""
     Create 3 {q_type} Answer Theory Questions based on the text.
@@ -188,7 +174,7 @@ def generate_theory_questions(raw_text, q_type, marks, client):
     {length_instruction}
     
     Format:
-    **Q1:** [Question]
+    ### Q1: [Question]
     **Answer:** [Ideal Answer]
     
     CONTENT: {raw_text[:15000]}
@@ -199,7 +185,7 @@ def generate_theory_questions(raw_text, q_type, marks, client):
             messages=[{"role": "user", "content": prompt}], temperature=0.4
         )
         return completion.choices[0].message.content
-    except: return "Error generating theory."
+    except Exception as e: return f"Error generating theory: {str(e)}"
 
 # --- MAIN UI ---
 
@@ -217,7 +203,7 @@ with st.sidebar:
     for p in saved:
         if st.button(f"📄 {p}", use_container_width=True):
             st.session_state.current_project = p
-            st.session_state.quiz_data = None # Reset quiz on switch
+            st.session_state.quiz_data = None 
             st.rerun()
     if st.button("+ New Project"): st.session_state.current_project = None; st.rerun()
 
@@ -241,6 +227,11 @@ if st.session_state.current_project is None:
 # PAGE 2: DASHBOARD
 else:
     data = get_project_details(st.session_state.current_project)
+    
+    # Check if raw text exists, if not, warn user
+    if not data['raw_text'] or len(data['raw_text']) < 50:
+        st.error("⚠️ Warning: This project has no readable text. The PDF might be blank or corrupted. Quiz generation will fail.")
+
     st.header(f"📘 {data['name']}")
     
     tab1, tab2, tab3 = st.tabs(["📖 Study Notes", "📝 Practice", "📊 Analytics"])
@@ -258,40 +249,43 @@ else:
                 st.info("Test your knowledge. Results are tracked to identify weak areas.")
             with col2:
                 if st.button("🔄 Generate New Quiz"):
-                    # Smart Logic: Check weak areas first
                     weak_spots = get_weak_areas(data['name'])
-                    if weak_spots: st.toast(f"Focusing on weak areas: {', '.join(weak_spots)}")
-                    
                     with st.spinner("Generating adaptive questions..."):
                         q_data = generate_objective_quiz(data['raw_text'], weak_spots, client)
-                        st.session_state.quiz_data = q_data
-            
-            if st.session_state.get('quiz_data'):
-                qs = st.session_state.quiz_data.get('questions', [])
-                with st.form("quiz_form"):
-                    for i, q in enumerate(qs):
-                        st.markdown(f"**Q{i+1}: {q['question']}**")
-                        if q['type'] == 'MCQ':
-                            choice = st.radio("Choose:", q['options'], key=f"q{i}", index=None)
+                        
+                        # Check for errors in generation
+                        if "error" in q_data:
+                            st.error(q_data["error"])
                         else:
-                            choice = st.radio("Choose:", ["True", "False"], key=f"q{i}", index=None)
-                        st.divider()
-                    
-                    if st.form_submit_button("Submit Answers"):
-                        score = 0
+                            st.session_state.quiz_data = q_data
+            
+            if st.session_state.get('quiz_data') and "questions" in st.session_state.quiz_data:
+                qs = st.session_state.quiz_data['questions']
+                if not qs:
+                    st.warning("AI generated 0 questions. Try again.")
+                else:
+                    with st.form("quiz_form"):
                         for i, q in enumerate(qs):
-                            user_ans = st.session_state.get(f"q{i}")
-                            correct = (user_ans == q['correct_option'])
-                            if correct: score += 1
-                            
-                            # LOG RESULT TO DB
-                            log_quiz_result(data['name'], q.get('topic', 'General'), q['type'], correct)
-                            
-                            if correct:
-                                st.success(f"Q{i+1}: Correct! ✅")
+                            st.markdown(f"**Q{i+1}: {q['question']}**")
+                            if q['type'] == 'MCQ':
+                                st.radio("Choose:", q['options'], key=f"q{i}", index=None)
                             else:
-                                st.error(f"Q{i+1}: Incorrect ❌. Answer: {q['correct_option']}")
-                        st.metric("Your Score", f"{score}/{len(qs)}")
+                                st.radio("Choose:", ["True", "False"], key=f"q{i}", index=None)
+                            st.divider()
+                        
+                        if st.form_submit_button("Submit Answers"):
+                            score = 0
+                            for i, q in enumerate(qs):
+                                user_ans = st.session_state.get(f"q{i}")
+                                correct = (user_ans == q['correct_option'])
+                                if correct: score += 1
+                                log_quiz_result(data['name'], q.get('topic', 'General'), q['type'], correct)
+                                
+                                if correct:
+                                    st.success(f"Q{i+1}: Correct! ✅")
+                                else:
+                                    st.error(f"Q{i+1}: Incorrect ❌. Answer: {q['correct_option']}")
+                            st.metric("Your Score", f"{score}/{len(qs)}")
         
         else: # THEORY MODE
             st.info("Study ideal answers for theory questions.")
@@ -310,18 +304,14 @@ else:
     with tab3:
         st.subheader("📈 Performance Tracker")
         conn = sqlite3.connect('study_db.sqlite')
-        # Simple Accuracy Metric
         try:
             res = conn.execute("SELECT AVG(is_correct), COUNT(*) FROM quiz_performance WHERE project_name=?", (data['name'],)).fetchone()
             acc = round((res[0] or 0) * 100, 1)
             total = res[1]
-            
             col_a, col_b = st.columns(2)
             col_a.metric("Overall Accuracy", f"{acc}%")
             col_b.metric("Questions Attempted", total)
             
-            # Weakness Chart
-            st.write("#### Topic Breakdown")
             topics = conn.execute("SELECT topic_tag, AVG(is_correct) FROM quiz_performance WHERE project_name=? GROUP BY topic_tag", (data['name'],)).fetchall()
             if topics:
                 t_names = [t[0] for t in topics]
@@ -329,6 +319,5 @@ else:
                 st.bar_chart({t: s for t, s in zip(t_names, t_scores)})
             else:
                 st.caption("No quiz data yet. Take a quiz to see analytics!")
-                
         except: st.error("No data.")
         conn.close()
