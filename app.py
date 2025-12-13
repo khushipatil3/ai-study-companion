@@ -19,6 +19,16 @@ st.markdown("""
     .stTabs [data-baseweb="tab-list"] { gap: 10px; }
     .stTabs [data-baseweb="tab"] { height: 50px; white-space: pre-wrap; background-color: #f0f2f6; border-radius: 4px 4px 0px 0px; gap: 1px; padding-top: 10px; padding-bottom: 10px; }
     .stTabs [aria-selected="true"] { background-color: #ffffff; }
+    
+    /* Quiz Recap Box */
+    .recap-box {
+        background-color: #e8f4f8;
+        padding: 15px;
+        border-radius: 5px;
+        border-left: 5px solid #00aaff;
+        margin-top: 10px;
+        font-size: 0.95em;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -51,13 +61,17 @@ def log_quiz_result(project_name, topic, q_type, correct):
     conn.commit()
     conn.close()
 
-def get_weak_areas(project_name):
+def get_topic_performance(project_name):
+    """Returns weak (<60%) and strong (>60%) topics."""
     conn = sqlite3.connect('study_db.sqlite')
     c = conn.cursor()
     c.execute('''SELECT topic_tag, AVG(is_correct) as accuracy FROM quiz_performance WHERE project_name = ? GROUP BY topic_tag ORDER BY accuracy ASC''', (project_name,))
     data = c.fetchall()
     conn.close()
-    return [row[0] for row in data if row[1] < 0.6]
+    
+    weak = [row[0] for row in data if row[1] < 0.6]
+    strong = [row[0] for row in data if row[1] >= 0.6]
+    return weak, strong
 
 def get_project_details(name):
     conn = sqlite3.connect('study_db.sqlite')
@@ -99,7 +113,7 @@ def extract_content_with_vision(uploaded_file, client):
     return full_content
 
 def generate_study_notes(raw_text, level, client):
-    # This still uses the High-Quality 70B Model for Notes
+    # Uses 70B Model for high quality notes
     prompt = f"Create a comprehensive {level} study guide in Markdown based on this content: {raw_text[:25000]}"
     try:
         completion = client.chat.completions.create(
@@ -109,28 +123,27 @@ def generate_study_notes(raw_text, level, client):
         return completion.choices[0].message.content
     except: return "Error generating notes."
 
-# --- QUIZ & THEORY GENERATORS (OPTIMIZED) ---
+# --- QUIZ & THEORY GENERATORS ---
 
 def clean_json_string(json_str):
-    """Removes markdown code blocks if the AI adds them."""
     json_str = json_str.strip()
-    if json_str.startswith("```json"):
-        json_str = json_str[7:]
-    if json_str.endswith("```"):
-        json_str = json_str[:-3]
+    if json_str.startswith("```json"): json_str = json_str[7:]
+    if json_str.endswith("```"): json_str = json_str[:-3]
     return json_str.strip()
 
 def generate_objective_quiz(raw_text, weak_topics, client):
     if not raw_text or len(raw_text) < 100:
         return {"error": "Text too short. Please re-upload PDF."}
 
-    # OPTIMIZATION: Use smaller context & smaller model
-    context_text = raw_text[:5000]
-    focus_prompt = f"Focus specifically on these weak topics: {', '.join(weak_topics)}" if weak_topics else "Cover all topics evenly."
+    context_text = raw_text[:6000]
+    focus_prompt = f"PRIORITY: Focus strictly on these WEAK topics: {', '.join(weak_topics)}" if weak_topics else "Cover all topics evenly."
     
     prompt = f"""
     Create a JSON object with 5 practice questions based on the text.
     {focus_prompt}
+    
+    IMPORTANT: For each question, provide an 'explanation' field. 
+    This explanation should be a 2-sentence quick recap of the concept so the student learns why the answer is correct.
     
     Format:
     {{
@@ -140,13 +153,15 @@ def generate_objective_quiz(raw_text, weak_topics, client):
                 "question": "Question text...",
                 "options": ["A", "B", "C", "D"],
                 "correct_option": "A",
-                "topic": "Topic Name"
+                "topic": "Topic Name",
+                "explanation": "Concept recap here..."
             }},
             {{
                 "type": "TrueFalse",
                 "question": "Statement...",
                 "correct_option": "True",
-                "topic": "Topic Name"
+                "topic": "Topic Name",
+                "explanation": "Concept recap here..."
             }}
         ]
     }}
@@ -156,7 +171,7 @@ def generate_objective_quiz(raw_text, weak_topics, client):
     """
     try:
         completion = client.chat.completions.create(
-            model="llama-3.1-8b-instant", # ✅ CHEAPER MODEL
+            model="llama-3.1-8b-instant",
             messages=[{"role": "user", "content": prompt}], temperature=0.5, response_format={"type": "json_object"}
         )
         content = completion.choices[0].message.content
@@ -165,29 +180,27 @@ def generate_objective_quiz(raw_text, weak_topics, client):
     except Exception as e:
         return {"error": f"Quiz Generation Failed: {str(e)}"}
 
-def generate_theory_questions(raw_text, q_type, marks, client):
+def generate_theory_questions(raw_text, q_type, marks, num_q, client):
     if not raw_text: return "Error: No text available."
 
-    # OPTIMIZATION: Use smaller context & smaller model
-    context_text = raw_text[:5000]
-
+    context_text = raw_text[:6000]
     length_instruction = "Answer in 2-3 sentences." if q_type == "Short" else "Answer in 2 paragraphs."
     if q_type == "Custom": length_instruction = f"These are {marks}-mark questions. Detail matches marks."
     
     prompt = f"""
-    Create 3 {q_type} Answer Theory Questions based on the text.
+    Create {num_q} {q_type} Answer Theory Questions based on the text.
     Provide the Ideal Answer for each.
     {length_instruction}
     
     Format:
     ### Q1: [Question]
-    **Answer:** [Ideal Answer]
+    **Ideal Answer:** [Answer]
     
     CONTENT: {context_text}
     """
     try:
         completion = client.chat.completions.create(
-            model="llama-3.1-8b-instant", # ✅ CHEAPER MODEL
+            model="llama-3.1-8b-instant",
             messages=[{"role": "user", "content": prompt}], temperature=0.4
         )
         return completion.choices[0].message.content
@@ -213,7 +226,6 @@ with st.sidebar:
             st.rerun()
     if st.button("+ New Project"): st.session_state.current_project = None; st.rerun()
     
-    # BACKUP BUTTON
     if st.session_state.get('current_project'):
         with open("study_db.sqlite", "rb") as f:
             st.download_button("📥 Backup Library", f, "study_db.sqlite")
@@ -253,80 +265,105 @@ else:
         st.subheader("🎯 Active Practice")
         mode = st.radio("Select Mode:", ["Objective (Interactive)", "Theory (Study Mode)"], horizontal=True)
         
+        weak_spots, _ = get_topic_performance(data['name'])
+
         if mode == "Objective (Interactive)":
             col1, col2 = st.columns([3, 1])
             with col1:
-                st.info("Test your knowledge. Results are tracked to identify weak areas.")
+                st.info("Test your knowledge. Feedback provided instantly.")
             with col2:
                 if st.button("🔄 Generate New Quiz"):
-                    weak_spots = get_weak_areas(data['name'])
+                    # ADAPTIVE LOGIC: Prioritize weak spots
+                    if weak_spots: 
+                        st.toast(f"Adaptively focusing on: {', '.join(weak_spots[:3])}")
+                    
                     with st.spinner("Generating adaptive questions..."):
                         q_data = generate_objective_quiz(data['raw_text'], weak_spots, client)
-                        
-                        if "error" in q_data:
-                            st.error(q_data["error"])
-                        else:
-                            st.session_state.quiz_data = q_data
+                        if "error" in q_data: st.error(q_data["error"])
+                        else: st.session_state.quiz_data = q_data
             
             if st.session_state.get('quiz_data') and "questions" in st.session_state.quiz_data:
                 qs = st.session_state.quiz_data['questions']
-                if not qs:
-                    st.warning("AI generated 0 questions. Try again.")
-                else:
-                    with st.form("quiz_form"):
+                
+                with st.form("quiz_form"):
+                    for i, q in enumerate(qs):
+                        st.markdown(f"**Q{i+1}: {q['question']}**")
+                        if q['type'] == 'MCQ':
+                            st.radio("Choose:", q['options'], key=f"q{i}", index=None)
+                        else:
+                            st.radio("Choose:", ["True", "False"], key=f"q{i}", index=None)
+                        st.divider()
+                    
+                    submitted = st.form_submit_button("Submit Answers")
+                    
+                    if submitted:
+                        score = 0
                         for i, q in enumerate(qs):
-                            st.markdown(f"**Q{i+1}: {q['question']}**")
-                            if q['type'] == 'MCQ':
-                                st.radio("Choose:", q['options'], key=f"q{i}", index=None)
+                            user_ans = st.session_state.get(f"q{i}")
+                            correct = (user_ans == q['correct_option'])
+                            if correct: score += 1
+                            log_quiz_result(data['name'], q.get('topic', 'General'), q['type'], correct)
+                            
+                            # INLINE FEEDBACK (New Feature)
+                            if correct:
+                                st.success(f"Q{i+1}: Correct! ✅")
                             else:
-                                st.radio("Choose:", ["True", "False"], key=f"q{i}", index=None)
-                            st.divider()
-                        
-                        if st.form_submit_button("Submit Answers"):
-                            score = 0
-                            for i, q in enumerate(qs):
-                                user_ans = st.session_state.get(f"q{i}")
-                                correct = (user_ans == q['correct_option'])
-                                if correct: score += 1
-                                log_quiz_result(data['name'], q.get('topic', 'General'), q['type'], correct)
-                                
-                                if correct:
-                                    st.success(f"Q{i+1}: Correct! ✅")
-                                else:
-                                    st.error(f"Q{i+1}: Incorrect ❌. Answer: {q['correct_option']}")
-                            st.metric("Your Score", f"{score}/{len(qs)}")
+                                st.error(f"Q{i+1}: Incorrect ❌. The answer is **{q['correct_option']}**.")
+                            
+                            # RECAP / EXPLANATION (New Feature)
+                            st.markdown(f"""
+                            <div class="recap-box">
+                                <b>💡 Quick Recap:</b> {q.get('explanation', 'Review the notes for this topic.')}
+                            </div>
+                            """, unsafe_allow_html=True)
+                            st.write("---")
+                            
+                        st.metric("Your Score", f"{score}/{len(qs)}")
         
         else: # THEORY MODE
             st.info("Study ideal answers for theory questions.")
-            col_t1, col_t2 = st.columns(2)
+            
+            col_t1, col_t2, col_t3 = st.columns(3)
             with col_t1:
                 t_type = st.selectbox("Type", ["Short Answer", "Long Answer", "Custom"])
             with col_t2:
                 marks = 5
                 if t_type == "Custom": marks = st.number_input("Marks Weightage", 1, 20, 5)
+            with col_t3:
+                # NEW FEATURE: Select Number of Questions
+                num_q = st.number_input("Number of Questions", 1, 10, 3)
             
             if st.button("Generate Theory Questions"):
                 with st.spinner("Thinking..."):
-                    res = generate_theory_questions(data['raw_text'], t_type, marks, client)
+                    res = generate_theory_questions(data['raw_text'], t_type, marks, num_q, client)
                     st.markdown(res)
 
     with tab3:
-        st.subheader("📈 Performance Tracker")
-        conn = sqlite3.connect('study_db.sqlite')
-        try:
-            res = conn.execute("SELECT AVG(is_correct), COUNT(*) FROM quiz_performance WHERE project_name=?", (data['name'],)).fetchone()
-            acc = round((res[0] or 0) * 100, 1)
-            total = res[1]
-            col_a, col_b = st.columns(2)
-            col_a.metric("Overall Accuracy", f"{acc}%")
-            col_b.metric("Questions Attempted", total)
-            
-            topics = conn.execute("SELECT topic_tag, AVG(is_correct) FROM quiz_performance WHERE project_name=? GROUP BY topic_tag", (data['name'],)).fetchall()
-            if topics:
-                t_names = [t[0] for t in topics]
-                t_scores = [t[1] * 100 for t in topics]
-                st.bar_chart({t: s for t, s in zip(t_names, t_scores)})
+        st.subheader("📈 Performance Analysis")
+        
+        weak_spots, strong_spots = get_topic_performance(data['name'])
+        
+        col_w, col_s = st.columns(2)
+        
+        with col_w:
+            st.error("⚠️ Weak Areas (Focus Here)")
+            if weak_spots:
+                for t in weak_spots:
+                    st.markdown(f"- **{t}** (Needs Review)")
+                    # Add image placeholder for weak topic
+                    st.caption(f"
+
+[Image of {t} diagram]
+")
             else:
-                st.caption("No quiz data yet. Take a quiz to see analytics!")
-        except: st.error("No data.")
-        conn.close()
+                st.write("No weak areas detected yet! Keep practicing.")
+                
+        with col_s:
+            st.success("✅ Strong Areas")
+            if strong_spots:
+                for t in strong_spots:
+                    st.markdown(f"- **{t}** (Mastered)")
+            else:
+                st.write("Take a quiz to identify your strengths.")
+                
+        st.caption("Note: The 'Generate New Quiz' button in the Practice tab will automatically prioritize your Weak Areas.")
