@@ -37,6 +37,19 @@ st.markdown("""
         color: red;
         font-weight: bold;
     }
+    .feedback-box {
+        padding: 10px;
+        margin: 5px 0;
+        border-radius: 5px;
+    }
+    .correct-feedback {
+        background-color: #e6ffe6; /* Light green */
+        border-left: 5px solid green;
+    }
+    .incorrect-feedback {
+        background-color: #ffe6e6; /* Light red */
+        border-left: 5px solid red;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -172,14 +185,13 @@ if 'quiz_data' not in st.session_state:
     st.session_state.quiz_data = None
 if 'quiz_submitted' not in st.session_state:
     st.session_state.quiz_submitted = False
+if 'user_answers' not in st.session_state:
+    st.session_state.user_answers = {}
 
 
-# --- HELPER FUNCTIONS ---
+# --- LLM Functions (Retained from previous response) ---
 
 def extract_content_text_only(uploaded_file):
-    """
-    Extracts text from a PDF file using PyMuPDF (text-only extraction for Groq's LLMs).
-    """
     uploaded_file.seek(0)
     doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
     full_content = ""
@@ -244,14 +256,12 @@ def generate_study_notes(raw_text, level, client):
     return final_notes
 
 def generate_analogies(notes, client):
-    """Generates 5 key topics from notes and a real-life analogy for each."""
-    
     system_prompt = """You are a creative tutor specializing in making complex scientific (Physics, Chemistry, Biology) and technical topics instantly relatable. 
     Your task is to identify 5 key concepts from the provided study notes. For each concept, provide a detailed, clear, real-life analogy. 
     Format the output strictly as a list of concepts and their analogies in clear Markdown. 
     Use the format: '**[Concept Title]**' followed by 'Analogy: [The detailed analogy]'.
     """
-    notes_truncated = notes[:10000] # Use a smaller chunk for quick, focused analogy generation
+    notes_truncated = notes[:10000]
     
     try:
         with st.spinner("Generating core concepts and analogies..."):
@@ -268,8 +278,6 @@ def generate_analogies(notes, client):
         return f"Error generating analogies: {e}"
 
 def generate_specific_analogy(topic, client):
-    """Generates a single analogy for a user-specified topic."""
-    
     system_prompt = f"""You are a creative tutor. Your task is to provide a single, detailed, and clear real-life analogy for the concept: '{topic}'. 
     The analogy must be highly relatable. Output only the analogy in clear Markdown, starting with the header '### Analogy for {topic}'.
     """
@@ -288,9 +296,7 @@ def generate_specific_analogy(topic, client):
     except Exception as e:
         return f"Error generating analogy: {e}"
 
-# --- Q&A FUNCTION (Markdown output remains the same) ---
 def generate_qna(notes, q_type, marks, client):
-    """Generates Theory Q&A based on the notes."""
     q_type_text = ""
     if q_type == "short":
         q_type_text = "5 questions requiring concise, short-answer responses (approx. 50-75 words each). Format each as Q: followed by A:."
@@ -300,8 +306,6 @@ def generate_qna(notes, q_type, marks, client):
         q_type_text = f"5 questions suitable for an exam where each question is worth approximately {marks} marks. The length and detail should match typical answers for that mark value. Format each as Q: followed by A:."
         
     system_prompt = f"You are a study guide generator. Your task is to analyze the provided study notes and generate {q_type_text} The output must be pure markdown."
-    
-    # Truncate notes for API call limit 
     notes_truncated = notes[:15000]
     
     try:
@@ -318,14 +322,7 @@ def generate_qna(notes, q_type, marks, client):
     except Exception as e:
         return f"Error generating Q&A: {e}"
 
-# --- NEW INTERACTIVE PRACTICE FUNCTION (JSON Output) ---
-
 def generate_interactive_drills(notes, client):
-    """
-    Generates interactive practice drills (MCQ, T/F, Select) in a strict JSON format 
-    to enable easy parsing and interactive grading.
-    """
-    
     system_prompt = """You are a quiz master for technical subjects. Based on the notes provided, generate a quiz with 10 questions total.
     The quiz must consist of:
     1. 5 Multiple Choice Questions (MCQs), each with 4 options (A, B, C, D).
@@ -371,16 +368,15 @@ def generate_interactive_drills(notes, client):
                 ],
                 temperature=0.8
             )
-        # The output is a JSON string
         return completion.choices[0].message.content
     except Exception as e:
         st.error(f"Error generating JSON practice drills: {e}")
         return None
 
-# --- UI INTERACTIVE LOGIC ---
+# --- UI INTERACTIVE LOGIC (MODIFIED FOR IN-PLACE FEEDBACK) ---
 
 def display_and_grade_quiz(quiz_json_str):
-    """Renders the interactive quiz, collects answers, and shows instant feedback."""
+    """Renders the interactive quiz, collects answers, and shows instant feedback *in-place*."""
     try:
         quiz_data = json.loads(quiz_json_str)
         questions = quiz_data.get('questions', [])
@@ -392,126 +388,159 @@ def display_and_grade_quiz(quiz_json_str):
     st.markdown("Select your answers and click **Submit Quiz** for instant feedback.")
 
     # Dictionary to store user's choices
-    user_answers = {}
+    user_answers = st.session_state.user_answers
     
     # Render quiz form
     with st.form(key='quiz_form'):
+        
+        # Use a list to store the rendered elements for questions and feedback
+        rendered_elements = [] 
+
         for q in questions:
             q_id = q['id']
             question_key = f"q_{q_id}"
             
-            st.markdown(f"**Question {q_id}:** {q['question_text']}")
-            
-            # Render question based on type
-            options = q['options']
-            
-            # T/F questions are simplified to Radio buttons
-            if q['type'] == 'T/F':
-                # Map True/False to a fixed index for consistent grading logic
-                options_display = ["True", "False"] 
-                user_choice = st.radio(
-                    "Your Answer:", 
-                    options_display, 
-                    key=question_key,
-                    index=None # Starts with no selection
-                )
-            
-            # MCQ questions
-            elif q['type'] == 'MCQ':
-                # Extracting just the answer option text (A: ..., B: ...)
-                options_display = [opt.split(': ')[1] if ': ' in opt else opt for opt in options] 
+            # Start rendering the question in a container
+            q_container = st.empty()
+            with q_container.container():
+                st.markdown(f"**Question {q_id}:** {q['question_text']}")
                 
-                # We need to map the selected text back to the option letter (A, B, C, D)
-                user_choice_text = st.radio(
-                    "Your Answer:", 
-                    options_display, 
-                    key=question_key,
-                    index=None # Starts with no selection
-                )
+                # Render question based on type
+                options = q['options']
                 
-                # Find the option letter corresponding to the selected text
-                if user_choice_text:
-                    try:
-                        # Find the index of the selected text and use it to grab the option letter from A, B, C, D...
-                        index = options_display.index(user_choice_text)
-                        user_choice = ['A', 'B', 'C', 'D'][index]
-                    except ValueError:
+                user_choice = None
+
+                # T/F questions are simplified to Radio buttons
+                if q['type'] == 'T/F':
+                    options_display = ["True", "False"] 
+                    # Use the stored answer if it exists for pre-selection
+                    default_index = options_display.index(user_answers.get(q_id)) if user_answers.get(q_id) in options_display else None
+                    
+                    user_choice = st.radio(
+                        "Your Answer:", 
+                        options_display, 
+                        key=question_key,
+                        index=default_index,
+                        disabled=st.session_state.quiz_submitted
+                    )
+                
+                # MCQ questions
+                elif q['type'] == 'MCQ':
+                    # Extracting just the answer option text (A: ..., B: ...)
+                    options_display = [opt.split(': ')[1] if ': ' in opt else opt for opt in options] 
+                    
+                    # If we have a stored letter answer (A, B, C, D), pre-select the corresponding text
+                    default_index = None
+                    stored_answer_letter = user_answers.get(q_id)
+                    if stored_answer_letter in ['A', 'B', 'C', 'D']:
+                        try:
+                            index = ['A', 'B', 'C', 'D'].index(stored_answer_letter)
+                            default_index = index
+                        except ValueError:
+                            pass # If somehow the index is wrong
+
+                    user_choice_text = st.radio(
+                        "Your Answer:", 
+                        options_display, 
+                        key=question_key,
+                        index=default_index,
+                        disabled=st.session_state.quiz_submitted
+                    )
+                    
+                    # Map the selected text back to the option letter (A, B, C, D)
+                    if user_choice_text:
+                        try:
+                            index = options_display.index(user_choice_text)
+                            user_choice = ['A', 'B', 'C', 'D'][index]
+                        except ValueError:
+                            user_choice = None
+                    else:
                         user_choice = None
-                else:
-                    user_choice = None
-            
+
+            # Store the current choice regardless of submission state
             user_answers[q_id] = user_choice
-            st.markdown("---")
+            
+            # *** NEW: RENDER FEEDBACK IN-PLACE ***
+            if st.session_state.quiz_submitted:
+                
+                correct_answer = q['correct_answer']
+                concept_explanation = q['concept_explanation']
+                
+                # Determine the displayed correct answer
+                if q['type'] == 'T/F':
+                    correct_display = correct_answer
+                elif q['type'] == 'MCQ':
+                    correct_full_option = next((opt for opt in q['options'] if opt.startswith(correct_answer + ':')), 'N/A')
+                    correct_display = f"**{correct_answer}:** {correct_full_option.split(': ')[-1]}"
+                else:
+                    correct_display = correct_answer
+
+                # Grading logic
+                is_correct = False
+                if user_choice:
+                    if q['type'] == 'MCQ':
+                        is_correct = (user_choice == correct_answer)
+                    elif q['type'] == 'T/F':
+                        is_correct = (user_choice.strip() == correct_answer.strip())
+
+                
+                # Render the feedback box
+                feedback_html = ""
+                
+                if is_correct:
+                    feedback_html = f'<div class="feedback-box correct-feedback"><p class="correct">✅ **CORRECT!**</p></div>'
+                else:
+                    user_selected = user_choice if user_choice else "Not answered"
+                    feedback_html = f'''
+                    <div class="feedback-box incorrect-feedback">
+                        <p class="incorrect">❌ **INCORRECT.**</p>
+                        <p><strong>Your Choice:</strong> {user_selected}</p>
+                        <p><strong>Correct Answer:</strong> {correct_display}</p>
+                        <p><strong>Concept Review:</strong> {concept_explanation}</p>
+                    </div>
+                    '''
+                
+                st.markdown(feedback_html, unsafe_allow_html=True)
+            
+            st.markdown("---") # Separator after each question
 
 
         # Submission button
-        submit_button = st.form_submit_button(label='✅ Submit Quiz & Get Feedback', type="primary")
+        submit_button = st.form_submit_button(label='✅ Submit Quiz & Get Feedback', type="primary", disabled=st.session_state.quiz_submitted)
+        reset_button = st.form_submit_button(label='🔄 Reset Quiz', type="secondary")
 
     if submit_button:
         st.session_state.quiz_submitted = True
-        st.session_state.user_answers = user_answers
-        st.rerun() # Rerun to display results outside the form
-
+        st.session_state.user_answers = user_answers # Save current state
+        st.rerun() # Rerun to display the in-place results
+        
+    if reset_button:
+        st.session_state.quiz_submitted = False
+        st.session_state.user_answers = {}
+        st.rerun()
 
     if st.session_state.quiz_submitted:
-        st.subheader("Results and Instant Feedback")
         score = 0
-        total_questions = len(questions)
-
         for q in questions:
-            q_id = q['id']
-            user_answer = st.session_state.user_answers.get(q_id)
+            user_answer = st.session_state.user_answers.get(q['id'])
             correct_answer = q['correct_answer']
-            concept_explanation = q['concept_explanation']
             
-            # Ensure the correct answer is extracted for T/F or MCQ label
-            if q['type'] == 'T/F':
-                correct_display = correct_answer
-            elif q['type'] == 'MCQ':
-                # Find the full option text (e.g., 'B: The main component')
-                correct_full_option = next((opt for opt in q['options'] if opt.startswith(correct_answer + ':')), 'N/A')
-                correct_display = f"{correct_answer}: {correct_full_option.split(': ')[-1]}"
-            else:
-                correct_display = correct_answer
-
-
-            # Grading logic
-            is_correct = (str(user_answer) == str(correct_answer))
-            
-            # If MCQ, we compare the option letter (A, B, C...)
-            if q['type'] == 'MCQ' and user_answer:
-                 is_correct = (user_answer == correct_answer)
-            # If T/F, we compare the selected text ('True' or 'False') to the correct string
-            elif q['type'] == 'T/F' and user_answer:
-                 is_correct = (user_answer.strip() == correct_answer.strip())
-            else:
-                 is_correct = False
-
-
-            st.markdown(f"**Question {q_id}:** {q['question_text']}")
+            is_correct = False
+            if user_answer:
+                if q['type'] == 'MCQ':
+                    is_correct = (user_answer == correct_answer)
+                elif q['type'] == 'T/F':
+                    is_correct = (user_answer.strip() == correct_answer.strip())
             
             if is_correct:
                 score += 1
-                st.markdown(f'<p class="correct">CORRECT! 🎉</p>', unsafe_allow_html=True)
-            else:
-                # Display the user's choice and the correct answer
-                user_selected = user_answer if user_answer else "Not answered"
-                st.markdown(f'<p class="incorrect">INCORRECT. 😔</p>', unsafe_allow_html=True)
-                
-                # Provide instant learning feedback for wrong answers
-                st.info(f"**Your Choice:** {user_selected} | **Correct Answer:** {correct_display}")
-                
-                # Show explanation
-                st.markdown(f"**Concept Review:** {concept_explanation}")
-                
-            st.markdown("---")
-            
-        st.subheader(f"Final Score: {score}/{total_questions}")
-        if score == total_questions:
+
+        st.success(f"## Final Score: {score}/{len(questions)} 🎉")
+        if score == len(questions):
             st.balloons()
 
 
-# --- MAIN APP EXECUTION ---
+# --- MAIN APP EXECUTION (Sidebar and Layout functions remain the same) ---
 
 db = StudyDB() 
 
@@ -566,6 +595,7 @@ with st.sidebar:
             if st.button(f"📄 **{project_name}**", use_container_width=True, key=f"btn_{project_name}"):
                 st.session_state.current_project = project_name
                 st.session_state.quiz_submitted = False # Reset quiz state when switching projects
+                st.session_state.user_answers = {} # Clear answers
                 st.rerun()
         st.markdown("---")
                 
@@ -770,6 +800,7 @@ else:
                         db.update_practice_data(project_data['name'], "interactive_quiz", quiz_content)
                         st.session_state.quiz_data = quiz_content
                         st.session_state.quiz_submitted = False
+                        st.session_state.user_answers = {}
                         st.rerun()
 
                 st.divider()
