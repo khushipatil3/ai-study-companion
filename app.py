@@ -57,15 +57,23 @@ st.markdown("""
 def init_db():
     conn = sqlite3.connect('study_db.sqlite')
     c = conn.cursor()
-    # Updated CREATE TABLE with analogy_cache
-    c.execute('''CREATE TABLE IF NOT EXISTS projects (
+    
+    # --- GUARANTEED WIPE ---
+    # Delete old, incompatible tables completely before recreating.
+    # This will clear all data, ensuring a fresh start.
+    c.execute("DROP TABLE IF EXISTS projects")
+    c.execute("DROP TABLE IF EXISTS quiz_performance")
+    c.execute("DROP TABLE IF EXISTS srs_schedule")
+    
+    # Recreate all tables with the correct, latest schema (6 columns)
+    c.execute('''CREATE TABLE projects (
         name TEXT PRIMARY KEY, level TEXT, notes TEXT, raw_text TEXT, progress INTEGER DEFAULT 0, analogy_cache TEXT
     )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS quiz_performance (
+    c.execute('''CREATE TABLE quiz_performance (
         id INTEGER PRIMARY KEY AUTOINCREMENT, project_name TEXT, topic_tag TEXT, question_type TEXT, is_correct INTEGER, confidence TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
     )''')
     c.execute('''
-        CREATE TABLE IF NOT EXISTS srs_schedule (
+        CREATE TABLE srs_schedule (
             project_name TEXT, topic_tag TEXT, next_review DATE, interval_days INTEGER, PRIMARY KEY (project_name, topic_tag)
         )
     ''')
@@ -73,12 +81,11 @@ def init_db():
     conn.close()
 
 def save_project_to_db(name, level, notes, raw_text, analogy_cache=None):
-    # --- FIX: Simplified save logic to bypass "SELECT analogy_cache" error ---
-    # We rely on the INSERT OR REPLACE to update all 6 columns correctly.
+    # This function is now protected because init_db ensures the schema is correct.
     conn = sqlite3.connect('study_db.sqlite')
     c = conn.cursor()
     
-    # We must fetch the old cache value first to avoid overwriting it with NULL
+    # Fetch existing cache to prevent overwriting during project updates
     existing_cache = c.execute("SELECT analogy_cache FROM projects WHERE name=?", (name,)).fetchone()
     if existing_cache and analogy_cache is None:
         analogy_cache = existing_cache[0]
@@ -91,7 +98,6 @@ def save_project_to_db(name, level, notes, raw_text, analogy_cache=None):
     
     conn.commit()
     conn.close()
-    # --- END FIX ---
 
 def update_analogy_cache(project_name, cache_data):
     conn = sqlite3.connect('study_db.sqlite')
@@ -196,6 +202,7 @@ def load_all_projects():
     c.execute("SELECT name FROM projects")
     return [row[0] for row in c.fetchall()]
 
+# --- DB INIT RUNS HERE ---
 init_db()
 
 # --- HELPER FUNCTIONS (Extractors and Generators) ---
@@ -382,7 +389,7 @@ def generate_theory_questions(raw_text, q_type, marks, num_q, client):
         )
         return completion.choices[0].message.content
     except Exception as e: 
-        return f"Error generating theory: {str(e)}"
+        return f"Error generating theory: {str(e)}"}
 
 # --- PYQ ANALYZER LOGIC ---
 def analyze_pyq_pdf(pyq_file, client):
