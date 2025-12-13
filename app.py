@@ -6,7 +6,7 @@ import sqlite3
 import json
 import re
 from datetime import date, timedelta
-import os # <-- Import OS to delete the file
+import os # For the temporary DB fix
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="AI Study Companion", page_icon="🎓", layout="wide")
@@ -66,7 +66,7 @@ def init_db():
             # st.error(f"Could not delete database: {e}. Attempting to proceed.")
             pass
     # ************************************************
-
+    
     conn = sqlite3.connect('study_db.sqlite')
     c = conn.cursor()
     # Updated CREATE TABLE with analogy_cache
@@ -175,14 +175,13 @@ def get_topic_performance(project_name):
 
 def get_project_details(name):
     """
-    Fetches project details using column names for robustness (fixes the IndexError).
+    Fetches project details using column names for robustness.
     """
     conn = sqlite3.connect('study_db.sqlite')
     c = conn.cursor()
     c.execute("SELECT * FROM projects WHERE name=?", (name,))
     row = c.fetchone()
     
-    # Get the column names to map the data correctly
     columns = [desc[0] for desc in c.description]
     conn.close()
     
@@ -193,7 +192,6 @@ def get_project_details(name):
             "notes": row[columns.index("notes")],
             "raw_text": row[columns.index("raw_text")],
             "progress": row[columns.index("progress")],
-            # Safely check for the new column 'analogy_cache'
             "analogy_cache": row[columns.index("analogy_cache")] if "analogy_cache" in columns else None
         }
         return project_data
@@ -205,7 +203,6 @@ def load_all_projects():
     c.execute("SELECT name FROM projects")
     return [row[0] for row in c.fetchall()]
 
-# Initialize DB (This will now delete the old file first)
 init_db()
 
 # --- HELPER FUNCTIONS (Extractors and Generators) ---
@@ -344,7 +341,9 @@ def generate_theory_questions(raw_text, q_type, marks, num_q, client):
             messages=[{"role": "user", "content": prompt}], temperature=0.4
         )
         return completion.choices[0].message.content
-    except Exception as e: return f"Error generating theory: {str(e)}"}
+    except Exception as e: 
+        # FIX: Corrected syntax here
+        return f"Error generating theory: {str(e)}"
 
 # --- PYQ ANALYZER LOGIC ---
 def analyze_pyq_pdf(pyq_file, client):
