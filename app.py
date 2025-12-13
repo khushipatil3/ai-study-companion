@@ -329,7 +329,7 @@ def generate_theory_questions(raw_text, q_type, marks, num_q, client):
             messages=[{"role": "user", "content": prompt}], temperature=0.4
         )
         return completion.choices[0].message.content
-    except Exception as e: return f"Error generating theory: {str(e)}"}
+    except Exception as e: return f"Error generating theory: {str(e)}"
 
 # --- PYQ ANALYZER LOGIC ---
 def analyze_pyq_pdf(pyq_file, client):
@@ -417,7 +417,7 @@ else:
     
     if not data or not data['raw_text'] or len(data['raw_text']) < 50:
         st.error("⚠️ Error: Could not load project data or no readable text was found. Please upload a new document.")
-        st.stop() # Stop the app if data is missing
+        st.stop()
 
     st.header(f"📘 {data['name']}")
     
@@ -627,7 +627,7 @@ else:
             else:
                 st.write("Take a quiz to identify your strengths.")
                 
-        st.caption("Note: Low accuracy and low confidence scores flag a topic as a Weak Area for the next quiz.")
+        st.caption("Note: The 'Generate New Quiz' button in the Practice tab will automatically prioritize your Weak Areas.")
         
     # --- TAB 5: EXAM HACKER (PYQ) ---
     with tab4:
