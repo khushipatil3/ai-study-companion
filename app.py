@@ -1,131 +1,135 @@
 import streamlit as st
 import fitz  # PyMuPDF
 from groq import Groq
-import os
+import base64
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="AI Study Companion", page_icon="🎓", layout="wide")
 
 st.title("🎓 AI Study Companion")
-st.markdown("### Turn any lecture PDF into adaptive study notes (powered by Llama-3.3).")
+st.markdown("### Turn any lecture PDF into adaptive study notes.")
 
-# --- SIDEBAR: API KEY ---
+# --- SIDEBAR ---
 with st.sidebar:
     st.header("⚙️ Settings")
     api_key = st.text_input("Enter Groq API Key:", type="password")
-    st.info("Get a free key at console.groq.com")
     
     st.divider()
-    st.markdown("**Features:**")
-    st.markdown("- 🧠 **Model:** Llama-3.3 70B (Newer & Smarter)")
-    st.markdown("- 📝 **Adaptive Notes**")
-    st.markdown("- 🎯 **Quiz Generation**")
-
-# --- LOGIC FUNCTIONS ---
-
-def extract_text_from_pdf(uploaded_file):
-    """
-    Extracts text and cleans it to prevent API crashes.
-    """
-    doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
-    text = ""
-    for page in doc:
-        text += page.get_text()
+    # TOGGLE FOR VISION MODE
+    use_vision = st.checkbox("👁️ Enable Vision Mode", help="Use this if your PDF has screenshots or scanned text. (Slower but sees everything)")
     
-    # 🧼 CLEANING STEP (Crucial for preventing crashes)
-    # Remove null bytes and strange control characters that break APIs
-    text = text.replace("\x00", "").strip()
-    return text
+    st.info("Using Llama-3.3 (Text) or Llama-3.2-Vision (Images)")
 
-def generate_study_notes(text_chunk, client):
-    """
-    Generates notes using Llama-3.3. Includes Error Handling.
-    """
-    if not text_chunk:
-        return "⚠️ Error: No text found in PDF. It might be an image-only scan."
+# --- LOGIC ---
+
+def encode_image(pix):
+    """Converts a PyMuPDF Pixmap into a base64 string for the API"""
+    return base64.b64encode(pix.tobytes()).decode('utf-8')
+
+def extract_content(uploaded_file, use_vision_mode, client):
+    doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
+    full_content = ""
+    
+    status_text = st.empty()
+    progress_bar = st.progress(0)
+    
+    total_pages = len(doc)
+    
+    for i, page in enumerate(doc):
+        progress = (i + 1) / total_pages
+        progress_bar.progress(progress)
+        
+        if use_vision_mode:
+            status_text.text(f"👁️ Scanning Page {i+1}/{total_pages} (Vision Mode)...")
+            
+            # 1. Convert PDF Page to Image
+            pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5)) # Zoom in for better quality
+            img_str = encode_image(pix)
+            
+            # 2. Send Image to Llama-3.2-Vision
+            # We ask the AI to transcribe everything it sees
+            try:
+                chat_completion = client.chat.completions.create(
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "Transcribe ALL text, code, and diagrams visible on this page into Markdown."},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/jpeg;base64,{img_str}",
+                                    },
+                                },
+                            ],
+                        }
+                    ],
+                    model="llama-3.2-11b-vision-preview",
+                )
+                page_text = chat_completion.choices[0].message.content
+                full_content += f"\n--- Page {i+1} ---\n{page_text}\n"
+            except Exception as e:
+                st.error(f"Error scanning page {i+1}: {e}")
+                
+        else:
+            # FAST TEXT MODE (Original)
+            status_text.text(f"📖 Reading Page {i+1}/{total_pages} (Text Mode)...")
+            text = page.get_text().replace("\x00", "") # Clean null bytes
+            full_content += text
+            
+    status_text.empty()
+    progress_bar.empty()
+    return full_content
+
+def generate_study_notes(raw_text, client):
+    if not raw_text: return "⚠️ Error: No content extracted."
 
     prompt = f"""
-    Act as an expert Professor. Create a structured study guide for the following text.
+    Act as an expert Professor. Create a structured study guide.
     
-    TEXT: {text_chunk[:15000]} 
+    CONTENT: {raw_text[:25000]} 
     
     INSTRUCTIONS:
     1. **Format:** Use clear Markdown headers (## Topic Name).
-    2. **Structure:** Adapt to the content (Definitions, Process Steps, Comparisons).
-    3. **Exam Tips:** Include specific "Exam Strategy" boxes for tricky concepts.
-    4. **Tone:** Academic but accessible.
+    2. **Structure:** Adapt to the content (Definitions, Process Steps, Pros/Cons).
+    3. **Exam Tips:** Include "Exam Strategy" boxes.
+    4. **Images:** If the text describes a diagram, add a placeholder [Image of...].
     
     Output strictly Markdown.
     """
     
     try:
         completion = client.chat.completions.create(
-            # ✅ UPDATED MODEL ID HERE
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            max_completion_tokens=4000, # Updated parameter name for new API
-        )
-        return completion.choices[0].message.content
-        
-    except Exception as e:
-        return f"❌ API Error: {str(e)}"
-
-def generate_quiz(text_chunk, client):
-    prompt = f"""
-    Create 5 Multiple Choice Questions (MCQs) based on this text.
-    Format the output so the answer is hidden or at the bottom.
-    TEXT: {text_chunk[:5000]}
-    """
-    try:
-        completion = client.chat.completions.create(
-            # ✅ UPDATED MODEL ID HERE
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.5, 
+            temperature=0.3
         )
         return completion.choices[0].message.content
     except Exception as e:
-        return f"❌ Quiz Error: {str(e)}"
+        return f"❌ AI Error: {e}"
 
 # --- MAIN UI ---
 
 if not api_key:
-    st.warning("⚠️ Please enter your Groq API Key in the sidebar to start.")
+    st.warning("⚠️ Enter Groq API Key to start.")
     st.stop()
 
-# Initialize Client
-try:
-    client = Groq(api_key=api_key)
-except Exception as e:
-    st.error(f"Invalid API Key format: {e}")
-    st.stop()
+client = Groq(api_key=api_key)
 
-uploaded_file = st.file_uploader("📂 Upload your Lecture PDF", type="pdf")
+uploaded_file = st.file_uploader("📂 Upload PDF", type="pdf")
 
 if uploaded_file:
-    if st.button("🚀 Generate Study Guide"):
-        with st.spinner("Analyzing document... (Llama-3.3 is fast!)"):
-            # 1. Extract Text
-            try:
-                raw_text = extract_text_from_pdf(uploaded_file)
-                st.success(f"✅ Read {len(raw_text)} characters.")
-            except Exception as e:
-                st.error(f"Error reading PDF: {e}")
-                st.stop()
+    if st.button("🚀 Generate Notes"):
+        # 1. Extract (Text or Vision)
+        content = extract_content(uploaded_file, use_vision, client)
+        
+        if len(content) < 50:
+            st.error("⚠️ No text found! Try checking 'Enable Vision Mode' in the sidebar.")
+        else:
+            st.success(f"✅ Extracted {len(content)} characters.")
             
-            # 2. Create Tabs for Output
-            tab1, tab2 = st.tabs(["📘 Study Notes", "📝 Practice Quiz"])
-            
-            # 3. Generate Content
-            notes = generate_study_notes(raw_text, client)
-            quiz = generate_quiz(raw_text, client)
-            
-            with tab1:
+            # 2. Generate Notes
+            with st.spinner("🧠 Analyzing content..."):
+                notes = generate_study_notes(content, client)
                 st.markdown(notes)
-                # Helper to download
-                st.download_button("Download Notes (.md)", notes, file_name="Study_Notes.md")
-                
-            with tab2:
-                st.subheader("Test Your Knowledge")
-                st.markdown(quiz)
+                st.download_button("Download Notes", notes, file_name="Vision_Notes.md")
