@@ -215,13 +215,22 @@ if 'quiz_type' not in st.session_state:
     st.session_state.quiz_type = 'general'
 
 
-# --- LLM Functions (Modified Adaptive Quiz) ---
+# --- LLM Functions ---
 
-# ... [generate_study_notes, generate_analogies, generate_specific_analogy, generate_qna functions remain the same] ...
+# Helper function to ensure images are triggered only when appropriate
+def get_system_prompt(level):
+    if level == "Basic":
+        return """Act as a Tutor. GOAL: Pass the exam. Focus on definitions, brevity, and outlines. Output strictly Markdown. If you see text describing a diagram, use an 
 
-# Re-defining all LLM-related functions to ensure the final code block is complete
-# Only the new adaptive function and the interactive drill function are included here
-# The other LLM functions are assumed to be present and unchanged from the previous final response.
+[Image of X]
+ tag where X is a detailed description of the diagram."""
+    elif level == "Intermediate":
+        return """Act as a Professor. GOAL: Solid understanding. Use detailed definitions, process steps, and exam tips. Output strictly Markdown. Insert 
+
+[Image of X]
+ tags frequently where X is a detailed description of a relevant diagram or concept."""
+    else: # Advanced
+        return """Act as a Subject Matter Expert. GOAL: Mastery. Explain nuances, real-world context, and deep connections. Output strictly Markdown. Insert  tags for every concept that would be better understood with a visual aid, using a detailed description for X."""
 
 def generate_interactive_drills(notes, client):
     """Generates general interactive practice drills (MCQ, T/F) in a strict JSON format."""
@@ -303,16 +312,18 @@ def generate_adaptive_drills(notes, client, weak_topics):
         st.error(f"Error generating JSON adaptive drills: {e}")
         return None
 
-# --- UI INTERACTIVE LOGIC (MODIFIED FOR PROGRESS TRACKING) ---
+# --- UI INTERACTIVE LOGIC (MODIFIED FOR STRICT PROGRESS TRACKING) ---
 
 def process_and_update_progress(project_name, questions, user_answers):
     """
     Processes the quiz results, extracts concepts, and updates the database tracker.
+    Updates progress based on **any attempt**, no longer requiring total > 1.
     """
     concept_scores = {} # {concept: [correct_count, total_count]}
     
     for q in questions:
         q_id = q['id']
+        # Extract the core concept from the explanation string
         concept = q['concept_explanation'].split('is ')[-1].split(',')[0].strip().replace('.', '') 
         
         user_answer = user_answers.get(q_id)
@@ -330,7 +341,7 @@ def process_and_update_progress(project_name, questions, user_answers):
         if concept not in concept_scores:
             concept_scores[concept] = [0, 0]
         
-        concept_scores[concept][1] += 1 # Increment total attempts
+        concept_scores[concept][1] += 1 # Increment total attempts (always 1 per question in the quiz)
         if is_correct:
             concept_scores[concept][0] += 1 # Increment correct attempts
     
@@ -548,20 +559,6 @@ def generate_study_notes(raw_text, level, client):
     bar.empty()
     return final_notes
 
-def get_system_prompt(level):
-    if level == "Basic":
-        return """Act as a Tutor. GOAL: Pass the exam. Focus on definitions, brevity, and outlines. Output strictly Markdown. If you see text describing a diagram, use an 
-
-[Image of X]
- tag where X is a detailed description of the diagram."""
-    elif level == "Intermediate":
-        return """Act as a Professor. GOAL: Solid understanding. Use detailed definitions, process steps, and exam tips. Output strictly Markdown. Insert 
-
-[Image of X]
- tags frequently where X is a detailed description of a relevant diagram or concept."""
-    else:
-        return """Act as a Subject Matter Expert. GOAL: Mastery. Explain nuances, real-world context, and deep connections. Output strictly Markdown. Insert  tags for every concept that would be better understood with a visual aid, using a detailed description for X."""
-
 def generate_analogies(notes, client):
     system_prompt = """You are a creative tutor specializing in making complex scientific (Physics, Chemistry, Biology) and technical topics instantly relatable. Your task is to identify 5 key concepts from the provided study notes. For each concept, provide a detailed, clear, real-life analogy. Format the output strictly as a list of concepts and their analogies in clear Markdown. Use the format: '**[Concept Title]**' followed by 'Analogy: [The detailed analogy]'."""
     notes_truncated = notes[:10000]
@@ -597,6 +594,7 @@ def generate_qna(notes, q_type, marks, client):
         return completion.choices[0].message.content
     except Exception as e:
         return f"Error generating Q&A: {e}"
+
 
 # --- SIDEBAR (NAVIGATION) ---
 with st.sidebar:
@@ -643,8 +641,8 @@ with st.sidebar:
                 st.session_state.current_project = project_name
                 st.session_state.quiz_submitted = False 
                 st.session_state.user_answers = {} 
-                st.session_state.quiz_data = None # Clear old quiz data
-                st.session_state.quiz_type = 'general' # Reset quiz type
+                st.session_state.quiz_data = None 
+                st.session_state.quiz_type = 'general' 
                 st.rerun()
         st.markdown("---")
                 
@@ -838,10 +836,11 @@ else:
                 
                 # --- ADAPTIVE QUIZ ---
                 progress_tracker = json.loads(practice_data.get('progress_tracker') or "{}")
-                # Identify weak topics (e.g., score < 70% and attempted > 3 times)
+                
+                # --- NEW: Identify Weak Topics (Accuracy < 100%)
                 weak_topics = []
                 for concept, stats in progress_tracker.items():
-                    if stats['total'] > 1 and stats['correct'] / stats['total'] < 0.70:
+                    if stats['total'] > 0 and stats['correct'] / stats['total'] < 1.0: # Any incorrect answer makes it weak
                         weak_topics.append(concept)
                 
                 with col_adaptive:
@@ -856,7 +855,7 @@ else:
                                 st.session_state.quiz_type = 'adaptive'
                                 st.rerun()
                     else:
-                        st.info("Attempt a few quizzes to unlock adaptive targeting.")
+                        st.info("Attempt a quiz to unlock adaptive targeting.")
 
                 st.divider()
                 
@@ -869,7 +868,7 @@ else:
                 else:
                     st.info("Click a button above to generate a quiz.")
 
-        # --- TAB 3: PROGRESS TRACKER (Updated to show concepts) ---
+        # --- TAB 3: PROGRESS TRACKER (Updated to use strict definitions) ---
         with tab3:
             st.header("📊 Study Progress Tracker")
             
@@ -888,13 +887,11 @@ else:
                     percentage = (correct / total) * 100 if total > 0 else 0
                     
                     status = ""
-                    if total < 2:
-                        status = "Needs Practice"
-                    elif percentage >= 90:
+                    if total == 0:
+                        status = "Untested"
+                    elif percentage == 100:
                         status = "Strong Concept 💪"
-                    elif percentage >= 70:
-                        status = "Solid 👍"
-                    else:
+                    else: # percentage < 100
                         status = "Weak Point 🚨"
                     
                     progress_list.append({
@@ -904,8 +901,8 @@ else:
                         "Status": status
                     })
                 
-                # Sort by Status (Weak first) and then Accuracy
-                sorted_progress = sorted(progress_list, key=lambda x: (x['Status'] != "Weak Point 🚨", x['Status'] != "Needs Practice", x['Accuracy']), reverse=True)
+                # Sort by Status (Weak first, then Strong)
+                sorted_progress = sorted(progress_list, key=lambda x: (x['Status'] != "Weak Point 🚨", x['Status'] == "Strong Concept 💪"), reverse=False)
 
                 st.dataframe(
                     sorted_progress,
@@ -918,9 +915,9 @@ else:
                 weak_topics_for_display = [p['Concept'] for p in sorted_progress if p['Status'] == "Weak Point 🚨"]
                 
                 if weak_topics_for_display:
-                    st.error(f"### 🚨 Focus Areas:\n\nReview the notes and analogies for these weak concepts: \n* " + "\n* ".join(weak_topics_for_display))
+                    st.error(f"### 🚨 Weak Points Identified:\n\nReview the notes and analogies for these weak concepts to improve: \n* " + "\n* ".join(weak_topics_for_display))
                 else:
-                    st.success("### Great work! You have no weak concepts currently identified.")
+                    st.success("### Great work! All tested concepts are currently Strong Concepts. Keep up the practice!")
             
     else:
         st.error("⚠️ Error loading project data.")
