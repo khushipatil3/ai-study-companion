@@ -6,6 +6,7 @@ import sqlite3
 import json
 import re
 from datetime import date, timedelta
+import os # <-- Import OS to delete the file
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="AI Study Companion", page_icon="🎓", layout="wide")
@@ -53,6 +54,19 @@ st.markdown("""
 
 # --- DATABASE LAYER ---
 def init_db():
+    # ************************************************
+    # ** TEMPORARY FIX: DELETE OLD INCOMPATIBLE DB **
+    # ************************************************
+    if os.path.exists('study_db.sqlite'):
+        try:
+            # st.error("DELETING INCOMPATIBLE DATABASE FILE...") # Uncomment for debug visibility
+            os.remove('study_db.sqlite')
+        except Exception as e:
+            # This handles cases where the file might be locked.
+            # st.error(f"Could not delete database: {e}. Attempting to proceed.")
+            pass
+    # ************************************************
+
     conn = sqlite3.connect('study_db.sqlite')
     c = conn.cursor()
     # Updated CREATE TABLE with analogy_cache
@@ -191,6 +205,7 @@ def load_all_projects():
     c.execute("SELECT name FROM projects")
     return [row[0] for row in c.fetchall()]
 
+# Initialize DB (This will now delete the old file first)
 init_db()
 
 # --- HELPER FUNCTIONS (Extractors and Generators) ---
@@ -329,7 +344,7 @@ def generate_theory_questions(raw_text, q_type, marks, num_q, client):
             messages=[{"role": "user", "content": prompt}], temperature=0.4
         )
         return completion.choices[0].message.content
-    except Exception as e: return f"Error generating theory: {str(e)}"
+    except Exception as e: return f"Error generating theory: {str(e)}"}
 
 # --- PYQ ANALYZER LOGIC ---
 def analyze_pyq_pdf(pyq_file, client):
@@ -627,7 +642,7 @@ else:
             else:
                 st.write("Take a quiz to identify your strengths.")
                 
-        st.caption("Note: The 'Generate New Quiz' button in the Practice tab will automatically prioritize your Weak Areas.")
+        st.caption("Note: Low accuracy and low confidence scores flag a topic as a Weak Area for the next quiz.")
         
     # --- TAB 5: EXAM HACKER (PYQ) ---
     with tab4:
