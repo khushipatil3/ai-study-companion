@@ -220,7 +220,6 @@ def generate_study_notes(raw_text, level, client):
 
     pages = raw_text.split("--- PAGE_BREAK ---")
     
-    # Batch size adjusted for reliable API processing
     batch_size = 5 
     batches = [pages[i:i + batch_size] for i in range(0, len(pages), batch_size)]
     
@@ -240,8 +239,7 @@ def generate_study_notes(raw_text, level, client):
         
         batch_content = "\n".join(batch)
         
-        # --- CRITICAL STABILITY FIX: LIMIT CONTEXT PER BATCH ---
-        # The first 10,000 characters of the batch content
+        # CRITICAL STABILITY FIX: LIMIT CONTEXT PER BATCH
         limited_batch_content = batch_content[:10000]
 
         prompt = f"""
@@ -261,7 +259,6 @@ def generate_study_notes(raw_text, level, client):
             )
             final_notes += completion.choices[0].message.content + "\n\n---\n\n"
         except Exception as e:
-            # If one batch fails, we log the error but the rest might continue
             final_notes += f"\n\n(Error processing batch {i+1}: {e})\n\n"
             
     status_text.empty()
@@ -376,7 +373,7 @@ def generate_theory_questions(raw_text, q_type, marks, num_q, client):
         )
         return completion.choices[0].message.content
     except Exception as e: 
-        return f"Error generating theory: {str(e)}"}
+        return f"Error generating theory: {str(e)}"
 
 # --- PYQ ANALYZER LOGIC ---
 def analyze_pyq_pdf(pyq_file, client):
@@ -452,7 +449,6 @@ if st.session_state.current_project is None:
             with st.spinner("Step 1/2: Extracting content with Vision Mode..."):
                 text = extract_content_with_vision(up, client)
             with st.spinner("Step 2/2: Generating study notes (High Quality Model)..."):
-                # Notes generation now uses the stabilized batching logic
                 notes = generate_study_notes(text, level, client)
             
             save_project_to_db(name, level, notes, text)
