@@ -26,8 +26,16 @@ st.markdown("""
         padding: 15px;
         border-radius: 5px;
         border-left: 5px solid #00aaff;
-        margin-top: 10px;
+        margin-top: 5px;
+        margin-bottom: 20px;
         font-size: 0.95em;
+    }
+    .question-box {
+        background-color: #ffffff;
+        padding: 15px;
+        border-radius: 10px;
+        border: 1px solid #e0e0e0;
+        margin-bottom: 15px;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -62,7 +70,6 @@ def log_quiz_result(project_name, topic, q_type, correct):
     conn.close()
 
 def get_topic_performance(project_name):
-    """Returns weak (<60%) and strong (>60%) topics."""
     conn = sqlite3.connect('study_db.sqlite')
     c = conn.cursor()
     c.execute('''SELECT topic_tag, AVG(is_correct) as accuracy FROM quiz_performance WHERE project_name = ? GROUP BY topic_tag ORDER BY accuracy ASC''', (project_name,))
@@ -113,7 +120,6 @@ def extract_content_with_vision(uploaded_file, client):
     return full_content
 
 def generate_study_notes(raw_text, level, client):
-    # Uses 70B Model for high quality notes
     prompt = f"Create a comprehensive {level} study guide in Markdown based on this content: {raw_text[:25000]}"
     try:
         completion = client.chat.completions.create(
@@ -210,6 +216,9 @@ def generate_theory_questions(raw_text, q_type, marks, num_q, client):
 
 if 'current_project' not in st.session_state: st.session_state.current_project = None
 if 'api_key' not in st.session_state: st.session_state.api_key = None
+# New state for handling quiz submission flow
+if 'quiz_submitted' not in st.session_state: st.session_state.quiz_submitted = False
+if 'user_answers' not in st.session_state: st.session_state.user_answers = {}
 
 with st.sidebar:
     st.title("🗂️ My Library")
@@ -223,6 +232,7 @@ with st.sidebar:
         if st.button(f"📄 {p}", use_container_width=True):
             st.session_state.current_project = p
             st.session_state.quiz_data = None 
+            st.session_state.quiz_submitted = False # Reset quiz state on switch
             st.rerun()
     if st.button("+ New Project"): st.session_state.current_project = None; st.rerun()
     
@@ -268,6 +278,7 @@ else:
         weak_spots, _ = get_topic_performance(data['name'])
 
         if mode == "Objective (Interactive)":
+            # Generate Button Logic
             col1, col2 = st.columns([3, 1])
             with col1:
                 st.info("Test your knowledge. Feedback provided instantly.")
@@ -278,47 +289,74 @@ else:
                     
                     with st.spinner("Generating adaptive questions..."):
                         q_data = generate_objective_quiz(data['raw_text'], weak_spots, client)
-                        if "error" in q_data: st.error(q_data["error"])
-                        else: st.session_state.quiz_data = q_data
+                        if "error" in q_data: 
+                            st.error(q_data["error"])
+                        else: 
+                            st.session_state.quiz_data = q_data
+                            st.session_state.quiz_submitted = False
+                            st.session_state.user_answers = {}
             
+            # QUIZ DISPLAY LOGIC
             if st.session_state.get('quiz_data') and "questions" in st.session_state.quiz_data:
                 qs = st.session_state.quiz_data['questions']
                 
-                with st.form("quiz_form"):
-                    for i, q in enumerate(qs):
-                        st.markdown(f"**Q{i+1}: {q['question']}**")
-                        if q['type'] == 'MCQ':
-                            st.radio("Choose:", q['options'], key=f"q{i}", index=None)
-                        else:
-                            st.radio("Choose:", ["True", "False"], key=f"q{i}", index=None)
-                        st.divider()
-                    
-                    submitted = st.form_submit_button("Submit Answers")
-                    
-                    if submitted:
-                        score = 0
+                # State 1: Quiz NOT Submitted (Show Form)
+                if not st.session_state.quiz_submitted:
+                    with st.form("quiz_form"):
                         for i, q in enumerate(qs):
-                            user_ans = st.session_state.get(f"q{i}")
-                            correct = (user_ans == q['correct_option'])
-                            if correct: score += 1
-                            log_quiz_result(data['name'], q.get('topic', 'General'), q['type'], correct)
-                            
-                            # FEEDBACK SECTION
-                            if correct:
-                                st.success(f"Q{i+1}: Correct! ✅")
+                            st.markdown(f"**Q{i+1}: {q['question']}**")
+                            if q['type'] == 'MCQ':
+                                st.radio("Choose:", q['options'], key=f"q_input_{i}", index=None)
                             else:
-                                st.error(f"Q{i+1}: Incorrect ❌. The answer is **{q['correct_option']}**.")
+                                st.radio("Choose:", ["True", "False"], key=f"q_input_{i}", index=None)
+                            st.divider()
+                        
+                        submitted = st.form_submit_button("Submit Answers")
+                        
+                        if submitted:
+                            # Save answers and flip state
+                            for i in range(len(qs)):
+                                st.session_state.user_answers[i] = st.session_state.get(f"q_input_{i}")
+                            st.session_state.quiz_submitted = True
+                            st.rerun() # Force reload to show results view
+
+                # State 2: Quiz SUBMITTED (Show Results Inline)
+                else:
+                    score = 0
+                    for i, q in enumerate(qs):
+                        user_ans = st.session_state.user_answers.get(i)
+                        correct = (user_ans == q['correct_option'])
+                        if correct: score += 1
+                        
+                        # Log to DB (only once per submit to avoid dupes? simplified here)
+                        # Ideally we check if already logged, but for now we log.
+                        log_quiz_result(data['name'], q.get('topic', 'General'), q['type'], correct)
+                        
+                        # RENDER RESULT CARD
+                        with st.container():
+                            st.markdown(f"""<div class="question-box">
+                            <b>Q{i+1}: {q['question']}</b><br>
+                            Your Answer: {user_ans}
+                            </div>""", unsafe_allow_html=True)
                             
-                            # RECAP BOX (Fixed Syntax Here)
+                            if correct:
+                                st.success(f"✅ Correct! The answer is {q['correct_option']}.")
+                            else:
+                                st.error(f"❌ Incorrect. The correct answer is **{q['correct_option']}**.")
+                            
+                            # RECAP BOX (IMMEDIATELY BELOW)
                             explanation = q.get('explanation', 'Review the notes for this topic.')
                             st.markdown(f"""
                             <div class="recap-box">
                                 <b>💡 Quick Recap:</b> {explanation}
                             </div>
                             """, unsafe_allow_html=True)
-                            st.write("---")
-                            
-                        st.metric("Your Score", f"{score}/{len(qs)}")
+                    
+                    st.metric("Final Score", f"{score}/{len(qs)}")
+                    if st.button("Take Another Quiz"):
+                        st.session_state.quiz_submitted = False
+                        st.session_state.quiz_data = None
+                        st.rerun()
         
         else: # THEORY MODE
             st.info("Study ideal answers for theory questions.")
@@ -348,20 +386,15 @@ else:
             st.error("⚠️ Weak Areas (Focus Here)")
             if weak_spots:
                 for t in weak_spots:
-                    st.markdown(f"- **{t}** (Needs Review)")
-                    # Visual aid tag safely inserted with triple quotes
-                    st.caption(f"""Visual Aid: 
-
-[Image of {t} diagram]
-""")
+                    st.markdown(f"- **{t}**")
             else:
-                st.write("No weak areas detected yet! Keep practicing.")
+                st.write("No weak areas detected yet!")
                 
         with col_s:
             st.success("✅ Strong Areas")
             if strong_spots:
                 for t in strong_spots:
-                    st.markdown(f"- **{t}** (Mastered)")
+                    st.markdown(f"- **{t}**")
             else:
                 st.write("Take a quiz to identify your strengths.")
                 
