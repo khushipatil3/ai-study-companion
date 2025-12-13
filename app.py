@@ -309,7 +309,7 @@ else:
                             else:
                                 st.error(f"Q{i+1}: Incorrect ❌. The answer is **{q['correct_option']}**.")
                             
-                            # RECAP BOX (Safer F-String)
+                            # RECAP BOX (Fixed Syntax Here)
                             explanation = q.get('explanation', 'Review the notes for this topic.')
                             st.markdown(f"""
                             <div class="recap-box">
@@ -349,11 +349,11 @@ else:
             if weak_spots:
                 for t in weak_spots:
                     st.markdown(f"- **{t}** (Needs Review)")
-                    # Visual aid tag safely inserted
-                    st.caption(f"Visual Aid: 
+                    # Visual aid tag safely inserted with triple quotes
+                    st.caption(f"""Visual Aid: 
 
 [Image of {t} diagram]
-")
+""")
             else:
                 st.write("No weak areas detected yet! Keep practicing.")
                 
