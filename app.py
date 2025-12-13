@@ -7,6 +7,7 @@ import json
 import re
 from datetime import date, timedelta
 import os
+import time # For progress bars
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="AI Study Companion", page_icon="🎓", layout="wide")
@@ -54,9 +55,6 @@ st.markdown("""
 
 # --- DATABASE LAYER ---
 def init_db():
-    # TEMPORARY: Ensure OS is imported at the top
-    # The file deletion code is removed as of the latest stable code block
-    
     conn = sqlite3.connect('study_db.sqlite')
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS projects (
@@ -213,16 +211,59 @@ def extract_content_with_vision(uploaded_file, client):
     bar.empty()
     return full_content
 
+# --- BATCH NOTES GENERATION (HIGHLY STABLE) ---
 def generate_study_notes(raw_text, level, client):
-    prompt = f"Create a comprehensive {level} study guide in Markdown based on this content: {raw_text[:25000]}"
-    try:
-        completion = client.chat.completions.create(
-            # --- FAIL-SAFE MODEL SWITCH ---
-            model="llama-3.1-405b-versatile", # Switched from 70B for stability
-            messages=[{"role": "user", "content": prompt}], temperature=0.3
-        )
-        return completion.choices[0].message.content
-    except: return "Error generating notes."
+    if not raw_text: return "Error: No content extracted for processing."
+
+    # Split content by the delimiter created during vision extraction
+    pages = raw_text.split("--- PAGE_BREAK ---")
+    
+    # Use a small batch size for extreme stability (e.g., 5 pages per batch)
+    batch_size = 5 
+    batches = [pages[i:i + batch_size] for i in range(0, len(pages), batch_size)]
+    
+    final_notes = f"# 📘 {level} Study Guide\n\n"
+    
+    status_text = st.empty()
+    bar = st.progress(0)
+    
+    system_instructions = f"Act as a Professor. Create a comprehensive {level} study guide in Markdown. Use descriptive headers and relevant 
+
+[Image of X]
+ tags."
+
+    for i, batch in enumerate(batches):
+        bar.progress((i + 1) / len(batches))
+        status_text.caption(f"🧠 Synthesizing Batch {i+1}/{len(batches)}...")
+        
+        batch_content = "\n".join(batch)
+        
+        prompt = f"""
+        {system_instructions}
+        
+        CONTENT TO PROCESS (Batch {i+1}):
+        {batch_content}
+        
+        Output strictly Markdown.
+        """
+        
+        try:
+            completion = client.chat.completions.create(
+                # Use a very powerful but stable model for synthesis
+                model="llama-3.1-405b-versatile",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3
+            )
+            final_notes += completion.choices[0].message.content + "\n\n---\n\n"
+        except Exception as e:
+            final_notes += f"\n\n(Error processing batch {i+1}: {e})\n\n"
+            
+    status_text.empty()
+    bar.empty()
+    if "(Error processing batch" in final_notes:
+        return "Error generating notes (API Timeout or failure on one batch)."
+    return final_notes
+# --- END BATCH NOTES GENERATION ---
 
 # --- BATCH ANALOGY GENERATOR ---
 def generate_batch_analogies(topic_list, client):
