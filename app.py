@@ -2,213 +2,255 @@ import streamlit as st
 import fitz  # PyMuPDF
 from groq import Groq
 import base64
+import sqlite3
+import json
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="AI Study Companion", page_icon="🎓", layout="wide")
 
-# --- CUSTOM CSS (Clean up the UI) ---
-# This hides the default "Manage App" menu to make it look cleaner
+# --- CSS STYLING ---
 st.markdown("""
 <style>
-    .reportview-container {
-        margin-top: -2em;
-    }
+    .reportview-container { margin-top: -2em; }
     #MainMenu {visibility: hidden;}
     .stDeployButton {display:none;}
     footer {visibility: hidden;}
 </style>
 """, unsafe_allow_html=True)
 
-# --- HEADER & SETTINGS ---
-st.title("🎓 AI Study Companion")
-st.markdown("### Upload your material, choose your depth, and start learning.")
+# --- DATABASE LAYER (SQLite) ---
+# This replaces the temporary session state with a permanent file 'study_db.sqlite'
 
-# We hide the API key in an expander to keep the UI clean
-with st.expander("⚙️ System Settings (API Key)", expanded=False):
-    api_key = st.text_input("Groq API Key:", type="password", help="Enter your key from console.groq.com")
-    st.info("ℹ️ Vision Mode is active by default. The AI will scan diagrams and charts.")
+def init_db():
+    """Creates the database table if it doesn't exist."""
+    conn = sqlite3.connect('study_db.sqlite')
+    c = conn.cursor()
+    # Create table to store projects
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS projects (
+            name TEXT PRIMARY KEY,
+            level TEXT,
+            notes TEXT,
+            raw_text TEXT,
+            progress INTEGER DEFAULT 0
+        )
+    ''')
+    conn.commit()
+    conn.close()
 
-# --- LOGIC FUNCTIONS ---
+def save_project_to_db(name, level, notes, raw_text):
+    """Saves a new project or updates an existing one."""
+    conn = sqlite3.connect('study_db.sqlite')
+    c = conn.cursor()
+    c.execute('''
+        INSERT OR REPLACE INTO projects (name, level, notes, raw_text, progress)
+        VALUES (?, ?, ?, ?, ?)
+    ''', (name, level, notes, raw_text, 0))
+    conn.commit()
+    conn.close()
+
+def load_all_projects():
+    """Fetches a list of all project names."""
+    conn = sqlite3.connect('study_db.sqlite')
+    c = conn.cursor()
+    c.execute("SELECT name FROM projects")
+    projects = [row[0] for row in c.fetchall()]
+    conn.close()
+    return projects
+
+def get_project_details(name):
+    """Fetches the full details of a specific project."""
+    conn = sqlite3.connect('study_db.sqlite')
+    c = conn.cursor()
+    c.execute("SELECT * FROM projects WHERE name=?", (name,))
+    row = c.fetchone()
+    conn.close()
+    if row:
+        return {
+            "name": row[0],
+            "level": row[1],
+            "notes": row[2],
+            "raw_text": row[3],
+            "progress": row[4]
+        }
+    return None
+
+# Initialize DB on app start
+init_db()
+
+# --- SESSION STATE ---
+if 'current_project' not in st.session_state:
+    st.session_state.current_project = None
+
+# --- HELPER FUNCTIONS ---
 
 def encode_image(pix):
     return base64.b64encode(pix.tobytes()).decode('utf-8')
 
 def extract_content_with_vision(uploaded_file, client):
-    """
-    Scans pages as images (Vision Mode) to capture all details.
-    """
     doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
     full_content = ""
-    
-    # Create a container for progress updates
     progress_container = st.empty()
     bar = st.progress(0)
-    
     total_pages = len(doc)
     
     for i, page in enumerate(doc):
-        # Update progress
         bar.progress((i + 1) / total_pages)
         progress_container.caption(f"👁️ Scanning Page {i+1} of {total_pages}...")
-
         try:
             pix = page.get_pixmap(matrix=fitz.Matrix(2, 2)) 
             img_str = encode_image(pix)
-            
             chat_completion = client.chat.completions.create(
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": "Transcribe this page into Markdown. Describe any diagrams or flowcharts in detail."},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/jpeg;base64,{img_str}",
-                                },
-                            },
-                        ],
-                    }
-                ],
+                messages=[{
+                    "role": "user", 
+                    "content": [
+                        {"type": "text", "text": "Transcribe this page into Markdown. Describe diagrams details."},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_str}"}}
+                    ]
+                }],
                 model="meta-llama/llama-4-scout-17b-16e-instruct",
             )
-            
-            page_text = chat_completion.choices[0].message.content
-            full_content += f"\n--- PAGE_BREAK ---\n{page_text}\n"
-            
-        except Exception as e:
-            full_content += f"\n--- PAGE_BREAK ---\n(Error reading page {i+1})\n"
+            full_content += f"\n--- PAGE_BREAK ---\n{chat_completion.choices[0].message.content}\n"
+        except:
+            full_content += f"\n--- PAGE_BREAK ---\n(Error on page {i+1})\n"
 
-    # Cleanup progress bars
     progress_container.empty()
     bar.empty()
     return full_content
 
 def get_system_prompt(level):
-    """
-    Returns specific instructions based on the user's selected difficulty.
-    """
-    if level == "Basic (Quick Summary)":
-        return """
-        Act as a Tutor creating a 'Crash Course' guide.
-        GOAL: The student just wants to pass the exam.
-        1. **Keep it simple:** Focus only on high-level definitions and core concepts.
-        2. **Brevity:** Use bullet points and short paragraphs.
-        3. **Outlines:** Create clear outlines of the chapters.
-        4. **Visuals:** Add 
+    if level == "Basic":
+        return "Act as a Tutor. GOAL: Pass the exam. Focus on definitions, brevity, and outlines. Add 
 
 [Image of X]
- tags only for the most critical diagrams.
-        """
-    elif level == "Intermediate (Detailed Notes)":
-        return """
-        Act as an expert Professor. Create a comprehensive study guide.
-        GOAL: The student wants a solid B+ or A grade.
-        1. **Format:** Use clear Markdown headers (## Topic).
-        2. **Structure:** Explain concepts clearly with definitions and process steps.
-        3. **Exam Tips:** Include specific "Exam Strategy" boxes.
-        4. **Visuals:** Insert 
+ tags only for critical diagrams."
+    elif level == "Intermediate":
+        return "Act as a Professor. GOAL: Solid understanding. Use detailed definitions, process steps, and exam tips. Insert 
 
 [Image of X]
- tags for every relevant concept or flowchart.
-        """
-    else:  # Advanced
-        return """
-        Act as a Subject Matter Expert and Researcher.
-        GOAL: The student wants to master the subject (Top 1%).
-        1. **Depth:** Dive deep into every nuance. Explain 'Why' and 'How', not just 'What'.
-        2. **Context:** Add information *outside* the text if it helps understanding (e.g., real-world applications).
-        3. **Connections:** Link concepts together to show the bigger picture.
-        4. **Visuals:** Insert  tags frequently.
-        """
+ tags frequently."
+    else:
+        return "Act as a Subject Matter Expert. GOAL: Mastery. Explain nuances, real-world context, and deep connections. Insert  tags for everything."
 
 def generate_study_notes(raw_text, level, client):
-    if not raw_text: return "⚠️ Error: No content extracted."
-
     pages = raw_text.split("--- PAGE_BREAK ---")
     batch_size = 15 
     batches = [pages[i:i + batch_size] for i in range(0, len(pages), batch_size)]
-    
     final_notes = f"# 📘 {level} Study Guide\n\n"
     
     status_text = st.empty()
     bar = st.progress(0)
     
-    # Get the specific instructions for the chosen level
-    system_instructions = get_system_prompt(level)
-    
     for i, batch in enumerate(batches):
         bar.progress((i + 1) / len(batches))
         status_text.caption(f"🧠 Synthesizing Batch {i+1}/{len(batches)}...")
-        
-        batch_content = "\n".join(batch)
-        
-        prompt = f"""
-        {system_instructions}
-        
-        CONTENT TO PROCESS:
-        {batch_content}
-        
-        Output strictly Markdown.
-        """
-        
+        prompt = f"""{get_system_prompt(level)}\nCONTENT: {"\n".join(batch)}\nOutput strictly Markdown."""
         try:
             completion = client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3
             )
-            batch_summary = completion.choices[0].message.content
-            final_notes += batch_summary + "\n\n---\n\n"
+            final_notes += completion.choices[0].message.content + "\n\n---\n\n"
         except Exception as e:
-            final_notes += f"\n\n(Error processing batch {i+1}: {e})\n\n"
+            final_notes += f"(Error: {e})"
             
     status_text.empty()
     bar.empty()
     return final_notes
 
-# --- MAIN UI FLOW ---
+# --- SIDEBAR (NAVIGATION) ---
+with st.sidebar:
+    st.title("🗂️ My Library")
+    
+    # API Key Handling
+    with st.expander("⚙️ Settings", expanded=not st.session_state.get('api_key_configured', False)):
+        api_key_input = st.text_input("Groq API Key", type="password")
+        if api_key_input:
+            st.session_state.api_key = api_key_input
+            st.session_state.api_key_configured = True
+            st.success("Ready!")
+    
+    st.divider()
+    
+    # LOAD PROJECTS FROM DATABASE
+    saved_projects = load_all_projects()
+    
+    if saved_projects:
+        st.write("### Saved Projects")
+        for project_name in saved_projects:
+            if st.button(f"📄 {project_name}", use_container_width=True):
+                st.session_state.current_project = project_name
+                st.rerun()
+                
+    if st.button("+ New Project", type="primary", use_container_width=True):
+        st.session_state.current_project = None
+        st.rerun()
 
-# 1. STOP if no API Key
-if not api_key:
-    st.warning("Please enter your API Key in the 'Settings' above to proceed.")
+# --- MAIN APP LOGIC ---
+
+if not st.session_state.get('api_key'):
+    st.warning("Please configure your API Key in the sidebar to start.")
     st.stop()
-
-client = Groq(api_key=api_key)
-
-# 2. File Upload Area
-st.divider()
-uploaded_file = st.file_uploader("📂 Step 1: Upload your Document", type="pdf")
-
-if uploaded_file:
-    # 3. Detail Selection (Only shows after upload)
-    st.write("### 🎚️ Step 2: Choose your Detail Level")
     
-    level = st.radio(
-        "How deep should we go?",
-        ["Basic (Quick Summary)", "Intermediate (Detailed Notes)", "Advanced (Mastery & Context)"],
-        index=1, # Default to Intermediate
-        horizontal=True
-    )
+client = Groq(api_key=st.session_state.api_key)
+
+# VIEW 1: CREATE NEW PROJECT
+if st.session_state.current_project is None:
+    st.title("🚀 New Study Project")
+    st.markdown("### Upload a document to add it to your library.")
     
-    # 4. Generate Button
-    if st.button("🚀 Generate Notes"):
-        
-        # A. Extract
-        content = extract_content_with_vision(uploaded_file, client)
-        
-        if len(content) < 50:
-            st.error("⚠️ No content found.")
-        else:
-            # B. Generate based on Level
-            notes = generate_study_notes(content, level, client)
+    uploaded_file = st.file_uploader("Upload PDF", type="pdf")
+    
+    if uploaded_file:
+        col1, col2 = st.columns(2)
+        with col1:
+            project_name = st.text_input("Project Name", value=uploaded_file.name.split('.')[0])
+        with col2:
+            level = st.select_slider("Detail Level", options=["Basic", "Intermediate", "Advanced"], value="Intermediate")
             
-            # C. Display
-            st.success("✨ Generation Complete!")
-            st.markdown(notes)
-            st.download_button("Download Notes (.md)", notes, file_name=f"{level.split()[0]}_Notes.md")
+        if st.button("✨ Create & Generate"):
+            # 1. Vision Extract
+            raw_text = extract_content_with_vision(uploaded_file, client)
             
-            # Placeholder for future features (Sidebar will populate here later)
-            with st.sidebar:
-                st.header("Tools")
-                st.info("Quiz & Flashcards coming in next update!")
+            # 2. Generate Notes
+            if len(raw_text) > 50:
+                notes = generate_study_notes(raw_text, level, client)
+                
+                # 3. SAVE TO DATABASE (PERMANENT)
+                save_project_to_db(project_name, level, notes, raw_text)
+                
+                st.session_state.current_project = project_name
+                st.rerun()
+            else:
+                st.error("Could not read document.")
+
+# VIEW 2: PROJECT DASHBOARD (THE WORKSPACE)
+else:
+    # Fetch data from DB
+    project_data = get_project_details(st.session_state.current_project)
+    
+    if project_data:
+        # Header
+        col_header, col_btn = st.columns([3, 1])
+        with col_header:
+            st.title(f"📘 {project_data['name']}")
+            st.caption(f"Level: {project_data['level']} | Status: ✅ Saved in Database")
+        with col_btn:
+            st.download_button("💾 Export Notes", project_data['notes'], file_name=f"{project_data['name']}.md")
+
+        # Tabs for Tools
+        tab1, tab2, tab3 = st.tabs(["📖 Study Notes", "🧠 Quiz & Practice", "📊 Progress Tracker"])
+        
+        with tab1:
+            st.markdown(project_data['notes'])
+            
+        with tab2:
+            st.info("🚧 Quiz and Flashcard modules coming in the next update!")
+            
+        with tab3:
+            st.metric("Completion", f"{project_data['progress']}%")
+            st.progress(project_data['progress'])
+            st.write("Track your reading and quiz scores here.")
+    else:
+        st.error("Error loading project.")
