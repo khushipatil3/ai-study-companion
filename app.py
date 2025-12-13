@@ -4,7 +4,6 @@ from groq import Groq
 import sqlite3
 import json
 import base64 
-# base64 import is not strictly needed after removing vision, but kept for compatibility/future use
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="AI Study Companion", page_icon="🎓", layout="wide")
@@ -128,6 +127,8 @@ if 'current_project' not in st.session_state:
     st.session_state.current_project = None
 if 'theory_marks' not in st.session_state:
     st.session_state.theory_marks = 5
+if 'groq_api_key' not in st.session_state: 
+    st.session_state.groq_api_key = None 
 
 # --- HELPER FUNCTIONS ---
 
@@ -212,7 +213,7 @@ def generate_qna(notes, q_type, marks, client):
         
     system_prompt = f"You are a study guide generator. Your task is to analyze the provided study notes and generate {q_type_text} The output must be pure markdown."
     
-    # Truncate notes for API call limit (usually around 16000 tokens for Llama 3 8k context)
+    # Truncate notes for API call limit (Llama 3 8k context)
     notes_truncated = notes[:15000]
     
     try:
@@ -254,28 +255,45 @@ def generate_practice_drills(notes, client):
 with st.sidebar:
     st.title("🗂️ My Library")
     
-    # API Key Handling (using st.secrets or input fallback)
-    api_key_configured = False
+    # --- API Key Handling (The Fix for TypeError) ---
+    final_api_key = None
+    
+    # 1. Check Streamlit Secrets (for deployed app)
     if "GROQ_API_KEY" in st.secrets:
+        final_api_key = st.secrets["GROQ_API_KEY"]
         st.success("API Key Loaded from Secrets.")
-        api_key_configured = True
-    else:
-        # Fallback for local testing
-        with st.expander("⚙️ Settings: Groq API Key", expanded=True):
-            api_key_input = st.text_input("Groq API Key (Set in Secrets for deployment)", type="password")
-            if api_key_input:
-                st.secrets["GROQ_API_KEY"] = api_key_input
-                st.session_state.api_key_configured = True
-                api_key_configured = True
-                st.success("Ready!")
-            elif st.session_state.get('api_key_configured'):
-                # Key was set earlier in session
-                api_key_configured = True
-                st.success("API Key is configured.")
+    
+    # 2. Check Session State (for user input)
+    if not final_api_key and st.session_state.groq_api_key:
+        final_api_key = st.session_state.groq_api_key
+        st.success("API Key is configured in this session.")
+        
+    # 3. Handle User Input
+    with st.expander("⚙️ Settings: Groq API Key", expanded=not bool(final_api_key)):
+        # If a key exists (from secrets or session), pre-fill the input
+        key_display_value = final_api_key if final_api_key else ""
+        
+        api_key_input = st.text_input(
+            "Groq API Key (Set in Secrets for deployment)", 
+            type="password", 
+            value=key_display_value
+        )
+        
+        # Logic to update session state only if input changes
+        if api_key_input and api_key_input != st.session_state.groq_api_key:
+            st.session_state.groq_api_key = api_key_input
+            st.rerun() 
+        # If input is empty but session state has a key (user deleted it), clear session state
+        elif not api_key_input and st.session_state.groq_api_key:
+            st.session_state.groq_api_key = None
+            st.rerun()
 
+    # Set the final flag
+    api_key_configured = bool(final_api_key)
 
     st.divider()
     
+    # LOAD PROJECTS FROM DATABASE
     saved_projects = db.load_all_projects()
     
     if saved_projects:
@@ -296,10 +314,10 @@ if not api_key_configured:
     st.stop()
     
 try:
-    # Initialize Groq client securely
-    client = Groq(api_key=st.secrets.get("GROQ_API_KEY"))
+    # Initialize Groq client using the determined key
+    client = Groq(api_key=final_api_key)
 except Exception as e:
-    st.error(f"Error initializing Groq client: {e}")
+    st.error(f"Error initializing Groq client. Please check the key. Details: {e}")
     st.stop()
 
 
@@ -370,6 +388,12 @@ else:
                 
                 col_short, col_long, col_custom = st.columns(3)
 
+                # Initialize display keys if they don't exist
+                if 'qna_display_key' not in st.session_state:
+                    st.session_state.qna_display_key = None
+                if 'qna_content' not in st.session_state:
+                    st.session_state.qna_content = None
+
                 # --- SHORT ANSWER ---
                 with col_short:
                     if st.button("Generate Short Answer (5 Qs)", key="btn_short"):
@@ -389,9 +413,10 @@ else:
                         st.rerun()
 
                 # --- CUSTOM ANSWER ---
-                custom_key = f"custom_qna_{st.session_state.theory_marks}"
+                custom_key_prefix = "custom_qna_"
                 with col_custom:
                     st.session_state.theory_marks = st.number_input("Custom Mark Value", min_value=1, max_value=25, value=st.session_state.theory_marks, key="mark_input")
+                    custom_key = f"{custom_key_prefix}{st.session_state.theory_marks}"
                     if st.button(f"Generate Custom ({st.session_state.theory_marks} Marks)", key="btn_custom"):
                         qna_content = generate_qna(project_data['notes'], "custom", st.session_state.theory_marks, client)
                         db.update_practice_data(project_data['name'], custom_key, qna_content)
@@ -405,16 +430,15 @@ else:
                 display_content = ""
                 display_key = st.session_state.get('qna_display_key')
 
-                if display_key:
-                    # Prioritize content generated in the current session
-                    display_content = st.session_state.get('qna_content')
-                
-                if not display_content and display_key in practice_data:
-                    # Fallback to content saved in the database
+                if display_key and st.session_state.qna_content:
+                    # 1. Prioritize content generated in the current session
+                    display_content = st.session_state.qna_content
+                elif display_key in practice_data:
+                    # 2. Fallback to content saved in the database based on the last selected key
                     display_content = practice_data[display_key]
-                elif not display_content:
-                    # Fallback to showing the latest saved content (in case of rerun)
-                    display_content = practice_data.get(f"custom_qna_{st.session_state.theory_marks}") or practice_data.get("long_qna") or practice_data.get("short_qna")
+                else:
+                    # 3. Fallback to showing any saved content
+                    display_content = practice_data.get("long_qna") or practice_data.get("short_qna")
 
                 if display_content:
                     st.markdown(display_content)
