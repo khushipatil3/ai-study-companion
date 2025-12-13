@@ -17,7 +17,7 @@ with st.sidebar:
     
     st.divider()
     st.success("👁️ Vision Mode is ACTIVE")
-    st.caption("Every page is scanned as an image to capture diagrams, charts, and screenshots.")
+    st.caption("Scans every page as an image to capture text, diagrams, and charts.")
 
 # --- LOGIC FUNCTIONS ---
 
@@ -27,8 +27,7 @@ def encode_image(pix):
 
 def extract_content_with_vision(uploaded_file, client):
     """
-    Scans every page as an image using Llama 4 Scout (Vision).
-    This ensures no diagrams or screenshots are missed.
+    Scans every page as an image using Llama 4 Scout.
     """
     doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
     full_content = ""
@@ -38,24 +37,22 @@ def extract_content_with_vision(uploaded_file, client):
     total_pages = len(doc)
     
     for i, page in enumerate(doc):
-        # Update UI Progress
         progress = (i + 1) / total_pages
         progress_bar.progress(progress)
         status_text.text(f"👁️ Scanning Page {i+1}/{total_pages}...")
 
         try:
-            # 1. Convert PDF Page to High-Res Image
-            # Matrix(2, 2) = 2x Zoom for better clarity on small text/charts
+            # 2x Zoom for better clarity on diagrams
             pix = page.get_pixmap(matrix=fitz.Matrix(2, 2)) 
             img_str = encode_image(pix)
             
-            # 2. Send Image to Llama 4 Scout (The new Vision Model)
+            # Send to Llama 4 Scout
             chat_completion = client.chat.completions.create(
                 messages=[
                     {
                         "role": "user",
                         "content": [
-                            {"type": "text", "text": "Transcribe this page into Markdown. If there are diagrams, charts, or screenshots, describe them in detail. Capture all text exactly."},
+                            {"type": "text", "text": "Transcribe this page into Markdown. Describe any diagrams or flowcharts in detail."},
                             {
                                 "type": "image_url",
                                 "image_url": {
@@ -65,17 +62,16 @@ def extract_content_with_vision(uploaded_file, client):
                         ],
                     }
                 ],
-                # ✅ NEWEST MODEL ID (Replaces decommissioned 3.2)
                 model="meta-llama/llama-4-scout-17b-16e-instruct",
             )
             
             page_text = chat_completion.choices[0].message.content
-            full_content += f"\n\n--- Page {i+1} ---\n{page_text}\n"
+            # Add a clear delimiter for splitting later
+            full_content += f"\n--- PAGE_BREAK ---\n{page_text}\n"
             
         except Exception as e:
             st.error(f"❌ Error scanning page {i+1}: {e}")
-            # Fallback to plain text if Vision fails for some reason
-            full_content += f"\n\n--- Page {i+1} (Text Fallback) ---\n{page.get_text()}\n"
+            full_content += f"\n--- PAGE_BREAK ---\n(Error reading page {i+1})\n"
 
     status_text.success("✅ Scanning Complete!")
     progress_bar.empty()
@@ -83,43 +79,78 @@ def extract_content_with_vision(uploaded_file, client):
 
 def generate_study_notes(raw_text, client):
     """
-    Summarizes the raw transcription into structured notes.
+    Split text into batches to avoid Token Limits, then combine results.
     """
     if not raw_text: return "⚠️ Error: No content extracted."
 
-    prompt = f"""
-    Act as an expert Professor. Create a structured study guide based on the transcribed lecture notes below.
+    # 1. SPLIT CONTENT BY PAGES
+    # We use the delimiter we added during extraction
+    pages = raw_text.split("--- PAGE_BREAK ---")
     
-    CONTENT: {raw_text[:30000]} 
+    # 2. CREATE BATCHES (e.g., 15 pages per batch)
+    # This ensures the AI doesn't get overwhelmed
+    batch_size = 15 
+    batches = [pages[i:i + batch_size] for i in range(0, len(pages), batch_size)]
     
-    INSTRUCTIONS:
-    1. **Format:** Use clear Markdown headers (## Topic Name).
-    2. **Structure:** Adapt to the content (Definitions, Process Steps, Pros/Cons).
-    3. **Visuals:** If the transcription mentions a diagram (e.g., "The image shows a flowchart..."), insert a placeholder tag like .
-    4. **Exam Tips:** Include specific "Exam Strategy" boxes.
+    final_notes = "# 📘 Comprehensive Study Guide\n\n"
     
-    Output strictly Markdown.
-    """
+    progress_text = st.empty()
+    bar = st.progress(0)
     
-    try:
-        completion = client.chat.completions.create(
-            # Using Llama 3.3 for the smart summarization part
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3
-        )
-        return completion.choices[0].message.content
-    except Exception as e:
-        return f"❌ AI Error: {e}"
+    for i, batch in enumerate(batches):
+        progress = (i + 1) / len(batches)
+        bar.progress(progress)
+        progress_text.text(f"🧠 Synthesizing Batch {i+1}/{len(batches)}...")
+        
+        batch_content = "\n".join(batch)
+        
+        prompt = f"""
+        Act as an expert Professor. Create detailed study notes for this section of the course.
+        
+        CONTENT TO PROCESS:
+        {batch_content}
+        
+        INSTRUCTIONS:
+        1. **Format:** Use clear Markdown headers (## Topic).
+        2. **Visuals:** If the text mentions a complex concept (like 'Mitosis', 'Architecture', 'Flowchart'), insert a tag like
+ immediately after the concept. 
+           - Example: "Data cleaning involves removing noise. 
+
+[Image of Data Cleaning Process Flowchart]
+"
+        3. **Detail:** Do not skip sections. Explain every concept found in the content.
+        4. **Tables:** If there is tabular data, format it as a Markdown table.
+        
+        Output strictly Markdown.
+        """
+        
+        try:
+            completion = client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3
+            )
+            batch_summary = completion.choices[0].message.content
+            final_notes += batch_summary + "\n\n---\n\n"
+        except Exception as e:
+            final_notes += f"\n\n(Error processing batch {i+1}: {e})\n\n"
+            
+    progress_text.empty()
+    bar.empty()
+    return final_notes
 
 def generate_quiz(raw_text, client):
     """
-    Generates a quiz based on the content.
+    Generates a quiz based on a random sample of the text to avoid limits.
     """
+    # Take the first 15000 chars roughly (Introduction + Unit 1)
+    # Sending 113 pages for a quiz is too much context
+    sample_text = raw_text[:20000] 
+    
     prompt = f"""
-    Create 5 Multiple Choice Questions (MCQs) based on this text.
+    Create 10 Multiple Choice Questions (MCQs) based on this text.
     Format the output so the answer is hidden or at the bottom.
-    TEXT: {raw_text[:10000]}
+    TEXT: {sample_text}
     """
     try:
         completion = client.chat.completions.create(
@@ -149,7 +180,7 @@ uploaded_file = st.file_uploader("📂 Upload your Lecture PDF", type="pdf")
 if uploaded_file:
     if st.button("🚀 Generate Study Guide"):
         
-        # 1. Extract (Vision Mode Always On)
+        # 1. Extract (Vision Mode)
         content = extract_content_with_vision(uploaded_file, client)
         
         if len(content) < 50:
@@ -159,9 +190,9 @@ if uploaded_file:
             tab1, tab2, tab3 = st.tabs(["📘 Study Notes", "📝 Practice Quiz", "🔍 Raw Transcription"])
             
             # 3. Generate Final Output
-            with st.spinner("🧠 Synthesizing notes from vision data..."):
-                notes = generate_study_notes(content, client)
-                quiz = generate_quiz(content, client)
+            # Note: We run these sequentially now to handle the progress bars correctly
+            notes = generate_study_notes(content, client)
+            quiz = generate_quiz(content, client)
             
             with tab1:
                 st.markdown(notes)
