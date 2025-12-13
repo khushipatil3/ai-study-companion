@@ -6,7 +6,7 @@ import sqlite3
 import json
 import re
 from datetime import date, timedelta
-# Removed: import os (No longer needed)
+import os
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="AI Study Companion", page_icon="🎓", layout="wide")
@@ -54,7 +54,9 @@ st.markdown("""
 
 # --- DATABASE LAYER ---
 def init_db():
-    # Database initialization is now clean and stable
+    # TEMPORARY: Ensure OS is imported at the top
+    # The file deletion code is removed as of the latest stable code block
+    
     conn = sqlite3.connect('study_db.sqlite')
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS projects (
@@ -187,8 +189,7 @@ def load_all_projects():
     c.execute("SELECT name FROM projects")
     return [row[0] for row in c.fetchall()]
 
-# --- DB INIT RUNS HERE ---
-# init_db()
+init_db()
 
 # --- HELPER FUNCTIONS (Extractors and Generators) ---
 def encode_image(pix):
@@ -216,7 +217,8 @@ def generate_study_notes(raw_text, level, client):
     prompt = f"Create a comprehensive {level} study guide in Markdown based on this content: {raw_text[:25000]}"
     try:
         completion = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            # --- FAIL-SAFE MODEL SWITCH ---
+            model="llama-3.1-405b-versatile", # Switched from 70B for stability
             messages=[{"role": "user", "content": prompt}], temperature=0.3
         )
         return completion.choices[0].message.content
@@ -405,7 +407,6 @@ if st.session_state.current_project is None:
             with st.spinner("Step 2/2: Generating study notes (High Quality Model)..."):
                 notes = generate_study_notes(text, level, client)
             
-            # This is where the old project data is overwritten/created
             save_project_to_db(name, level, notes, text)
             st.session_state.current_project = name
             st.rerun()
@@ -414,12 +415,9 @@ if st.session_state.current_project is None:
 else:
     data = get_project_details(st.session_state.current_project)
     
-    # Check for missing data (This is what triggers the error message you saw)
     if not data or not data['raw_text'] or len(data['raw_text']) < 50:
         st.error("⚠️ Error: Could not load project data or no readable text was found. Please click '+ New Project' and upload a new document.")
-        # Attempt to clean up the broken project if it exists
         st.session_state.current_project = None
-        # You might need to manually delete the project from the DB here if it's permanently corrupted.
         st.stop()
 
     st.header(f"📘 {data['name']}")
