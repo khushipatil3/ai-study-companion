@@ -7,7 +7,7 @@ import os
 st.set_page_config(page_title="AI Study Companion", page_icon="🎓", layout="wide")
 
 st.title("🎓 AI Study Companion")
-st.markdown("### Turn any lecture PDF into adaptive study notes (powered by Llama-3).")
+st.markdown("### Turn any lecture PDF into adaptive study notes (powered by Llama-3.3).")
 
 # --- SIDEBAR: API KEY ---
 with st.sidebar:
@@ -17,7 +17,7 @@ with st.sidebar:
     
     st.divider()
     st.markdown("**Features:**")
-    st.markdown("- 🧠 **Model:** Llama-3 70B (Fast & Smart)")
+    st.markdown("- 🧠 **Model:** Llama-3.3 70B (Newer & Smarter)")
     st.markdown("- 📝 **Adaptive Notes**")
     st.markdown("- 🎯 **Quiz Generation**")
 
@@ -39,7 +39,7 @@ def extract_text_from_pdf(uploaded_file):
 
 def generate_study_notes(text_chunk, client):
     """
-    Generates notes using Llama-3. Includes Error Handling.
+    Generates notes using Llama-3.3. Includes Error Handling.
     """
     if not text_chunk:
         return "⚠️ Error: No text found in PDF. It might be an image-only scan."
@@ -47,7 +47,7 @@ def generate_study_notes(text_chunk, client):
     prompt = f"""
     Act as an expert Professor. Create a structured study guide for the following text.
     
-    TEXT: {text_chunk[:10000]} 
+    TEXT: {text_chunk[:15000]} 
     
     INSTRUCTIONS:
     1. **Format:** Use clear Markdown headers (## Topic Name).
@@ -60,10 +60,11 @@ def generate_study_notes(text_chunk, client):
     
     try:
         completion = client.chat.completions.create(
-            model="llama3-70b-8192",
+            # ✅ UPDATED MODEL ID HERE
+            model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3,
-            max_tokens=4000,
+            max_completion_tokens=4000, # Updated parameter name for new API
         )
         return completion.choices[0].message.content
         
@@ -78,7 +79,8 @@ def generate_quiz(text_chunk, client):
     """
     try:
         completion = client.chat.completions.create(
-            model="llama3-70b-8192",
+            # ✅ UPDATED MODEL ID HERE
+            model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.5, 
         )
@@ -103,7 +105,7 @@ uploaded_file = st.file_uploader("📂 Upload your Lecture PDF", type="pdf")
 
 if uploaded_file:
     if st.button("🚀 Generate Study Guide"):
-        with st.spinner("Analyzing document... (Llama-3 is fast!)"):
+        with st.spinner("Analyzing document... (Llama-3.3 is fast!)"):
             # 1. Extract Text
             try:
                 raw_text = extract_text_from_pdf(uploaded_file)
