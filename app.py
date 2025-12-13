@@ -383,14 +383,14 @@ def generate_qna(notes, q_type, marks, client):
     except Exception as e:
         return f"Error generating Q&A: {e}"
         
-def analyze_past_papers(paper_content, notes, client):
+def analyze_past_papers(paper_content, client):
     """
-    Analyzes past paper content against the study notes to find key topics and repeated questions.
-    Updated to strictly enforce analysis of questions, not generation of answers from notes.
+    Analyzes past paper content to find key topics and repeated questions,
+    independent of the study notes.
     """
     system_prompt = """You are an expert exam analyst. Your primary task is to **analyze the pattern of questions** extracted from the past exam paper content. You MUST NOT generate answers to the questions.
 
-    Use the provided Study Notes (Context) only to verify if the key topics identified in the question paper are covered in the student's material.
+    Analyze the questions and the mark distribution to determine the most important topics and question patterns.
 
     Output must be in clear, actionable Markdown format, focusing only on the analysis:
     
@@ -398,21 +398,18 @@ def analyze_past_papers(paper_content, notes, client):
     2.  **Repeated Question Themes:** Identify questions that, while phrased differently, are essentially testing the same core information (e.g., "Explain X" and "What are the characteristics of X"). List 3-5 distinct themes.
     3.  **High-Level Strategy:** Provide a 3-point strategy for studying based *specifically* on the trends observed in the question content.
 
-    Study Notes for context: {notes}
-    
     Exam Question Content (The document you must analyze): {paper_content}
     """
     
     # Truncate content if necessary for the LLM context limit
-    content_truncated = paper_content[:10000]
-    notes_truncated = notes[:5000]
+    content_truncated = paper_content[:15000]
 
     try:
         with st.spinner("Analyzing past papers for trends and important topics..."):
             completion = client.chat.completions.create(
                 model=GROQ_MODEL, 
                 messages=[
-                    {"role": "system", "content": system_prompt.format(notes=notes_truncated, paper_content=content_truncated)},
+                    {"role": "system", "content": system_prompt.format(paper_content=content_truncated)},
                     {"role": "user", "content": "Perform the exam analysis and output the results as described (Analysis only, no answers)."}
                 ],
                 temperature=0.4
@@ -862,10 +859,9 @@ else:
                     if len(question_content.strip()) < 100:
                         st.error("The extracted text from the PDF is too short for meaningful analysis. Please check your file.")
                     else:
-                        # Crucial Fix: Pass the current project notes as context
+                        # **CRITICAL FIX:** Call the simplified function, passing ONLY the question paper content.
                         analysis_result = analyze_past_papers(
                             paper_content=question_content, 
-                            notes=project_data['notes'], # FIX: Use project notes as context
                             client=client
                         )
                         
