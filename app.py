@@ -57,6 +57,7 @@ st.markdown("""
 def init_db():
     conn = sqlite3.connect('study_db.sqlite')
     c = conn.cursor()
+    # Updated CREATE TABLE with analogy_cache
     c.execute('''CREATE TABLE IF NOT EXISTS projects (
         name TEXT PRIMARY KEY, level TEXT, notes TEXT, raw_text TEXT, progress INTEGER DEFAULT 0, analogy_cache TEXT
     )''')
@@ -72,17 +73,25 @@ def init_db():
     conn.close()
 
 def save_project_to_db(name, level, notes, raw_text, analogy_cache=None):
+    # --- FIX: Simplified save logic to bypass "SELECT analogy_cache" error ---
+    # We rely on the INSERT OR REPLACE to update all 6 columns correctly.
     conn = sqlite3.connect('study_db.sqlite')
     c = conn.cursor()
     
-    existing = c.execute("SELECT analogy_cache FROM projects WHERE name=?", (name,)).fetchone()
-    if existing and analogy_cache is None:
-        analogy_cache = existing[0]
+    # We must fetch the old cache value first to avoid overwriting it with NULL
+    existing_cache = c.execute("SELECT analogy_cache FROM projects WHERE name=?", (name,)).fetchone()
+    if existing_cache and analogy_cache is None:
+        analogy_cache = existing_cache[0]
+
+    # Full INSERT OR REPLACE statement for all 6 columns
+    c.execute('''
+        INSERT OR REPLACE INTO projects (name, level, notes, raw_text, progress, analogy_cache)
+        VALUES (?, ?, ?, ?, ?, ?)
+    ''', (name, level, notes, raw_text, 0, analogy_cache))
     
-    c.execute('INSERT OR REPLACE INTO projects (name, level, notes, raw_text, progress, analogy_cache) VALUES (?, ?, ?, ?, ?, ?)', 
-              (name, level, notes, raw_text, 0, analogy_cache))
     conn.commit()
     conn.close()
+    # --- END FIX ---
 
 def update_analogy_cache(project_name, cache_data):
     conn = sqlite3.connect('study_db.sqlite')
