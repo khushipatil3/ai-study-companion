@@ -5,6 +5,10 @@ import sqlite3
 import json
 import base64 
 
+# --- MODEL CONSTANT ---
+# FIX: Replace the decommissioned model with the current Groq recommendation for 70B performance.
+GROQ_MODEL = "llama-3.1-70b-versatile" 
+
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="AI Study Companion", page_icon="🎓", layout="wide")
 
@@ -187,7 +191,7 @@ def generate_study_notes(raw_text, level, client):
         
         try:
             completion = client.chat.completions.create(
-                model="llama3-70b-8192",
+                model=GROQ_MODEL, # FIX: Updated model
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3
             )
@@ -213,13 +217,13 @@ def generate_qna(notes, q_type, marks, client):
         
     system_prompt = f"You are a study guide generator. Your task is to analyze the provided study notes and generate {q_type_text} The output must be pure markdown."
     
-    # Truncate notes for API call limit (Llama 3 8k context)
+    # Truncate notes for API call limit 
     notes_truncated = notes[:15000]
     
     try:
         with st.spinner(f"Generating {q_type} Q&A from notes..."):
             completion = client.chat.completions.create(
-                model="llama3-70b-8192",
+                model=GROQ_MODEL, # FIX: Updated model
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": f"Generate Q&A based on the following notes: {notes_truncated}"}
@@ -240,7 +244,7 @@ def generate_practice_drills(notes, client):
     try:
         with st.spinner("Generating mixed practice drills..."):
             completion = client.chat.completions.create(
-                model="llama3-70b-8192",
+                model=GROQ_MODEL, # FIX: Updated model
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": f"Generate practice drills based on the following notes: {notes_truncated}"}
@@ -255,7 +259,7 @@ def generate_practice_drills(notes, client):
 with st.sidebar:
     st.title("🗂️ My Library")
     
-    # --- API Key Handling (The Fix for TypeError) ---
+    # --- API Key Handling ---
     final_api_key = None
     
     # 1. Check Streamlit Secrets (for deployed app)
@@ -413,10 +417,9 @@ else:
                         st.rerun()
 
                 # --- CUSTOM ANSWER ---
-                custom_key_prefix = "custom_qna_"
                 with col_custom:
                     st.session_state.theory_marks = st.number_input("Custom Mark Value", min_value=1, max_value=25, value=st.session_state.theory_marks, key="mark_input")
-                    custom_key = f"{custom_key_prefix}{st.session_state.theory_marks}"
+                    custom_key = f"custom_qna_{st.session_state.theory_marks}"
                     if st.button(f"Generate Custom ({st.session_state.theory_marks} Marks)", key="btn_custom"):
                         qna_content = generate_qna(project_data['notes'], "custom", st.session_state.theory_marks, client)
                         db.update_practice_data(project_data['name'], custom_key, qna_content)
