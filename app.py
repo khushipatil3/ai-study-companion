@@ -571,10 +571,12 @@ def display_and_grade_quiz(project_name, quiz_json_str):
         # Filter for valid questions to render
         valid_questions = [q for q in questions if isinstance(q, dict) and 'options' in q and 'id' in q and 'question_text' in q and 'type' in q]
 
-        for q in valid_questions:
+        # *** FIX FOR NUMBERING: Use enumerate(valid_questions) to ensure sequential numbers (q_num) ***
+        for q_index, q in enumerate(valid_questions):
             
             q_id = q['id']
-            question_key = f"q_{q_id}"
+            q_num = q_index + 1 # Use list index + 1 for display numbering
+            question_key = f"q_{q_id}" # Use the original LLM id for consistent answer mapping
             
             # Get concept for display
             concept_display = q.get('primary_concept', 'General Concept')
@@ -582,7 +584,8 @@ def display_and_grade_quiz(project_name, quiz_json_str):
             
             # Question rendering
             with st.container():
-                st.markdown(f"**Question {q_id} ({concept_display}):** {q['question_text']}")
+                # Display the sequential q_num instead of the potentially incorrect q_id
+                st.markdown(f"**Question {q_num} ({concept_display}):** {q['question_text']}")
                 
                 options = q['options'] 
                 user_choice = None
@@ -1080,8 +1083,7 @@ else:
                         st.session_state.quiz_type = 'general'
                         st.session_state.focus_quiz_active = False
                         st.session_state.quiz_data = None # Clear previous quiz
-                        st.session_state.quiz_submitted = False
-                        st.session_state.user_answers = {}
+                        st.session_state.quiz_answers = {}
                         st.rerun()
 
                 st.markdown("---")
