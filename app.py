@@ -638,7 +638,8 @@ def display_and_grade_quiz(project_name, quiz_json_str):
             # THIS IS THE FORM SUBMIT BUTTON
             submit_button = st.form_submit_button(label='✅ Submit Quiz', type="primary", disabled=st.session_state.quiz_submitted)
         with col_reset:
-            reset_button = st.form_submit_button(label='🔄 Reset Quiz', type="secondary')
+            # CORRECTED SYNTAX: Added the closing double quote for type="secondary"
+            reset_button = st.form_submit_button(label='🔄 Reset Quiz', type="secondary")
 
     if submit_button:
         # --- PROCESS QUIZ RESULTS & UPDATE TRACKER ---
@@ -931,9 +932,8 @@ else:
                 st.subheader("AI Exam Analysis Report")
                 st.markdown(analysis_to_display)
             else:
+                # This section is now empty until a user runs an analysis, as requested.
                 st.info("Upload a past paper PDF and click 'Run Exam Analysis' to generate a report.")
-                # **REQUIRED FIX:** Ensure this section is empty if no analysis has been run or stored.
-                pass 
 
 
         # --- TAB 2: PRACTICES ---
