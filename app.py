@@ -9,6 +9,10 @@ import base64
 # Current stable Groq model for fast, high-quality responses.
 GROQ_MODEL = "llama-3.1-8b-instant" 
 
+# --- CONFIGURABLE THRESHOLDS ---
+WEAK_TOPIC_ACCURACY_THRESHOLD = 0.80 # Below 80% is weak
+WEAK_TOPIC_MIN_ATTEMPTS = 3          # Must be attempted at least 3 times
+
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="AI Study Companion", page_icon="🎓", layout="wide")
 
@@ -224,6 +228,10 @@ if 'exam_analysis_pdf_content' not in st.session_state: # NEW: Store extracted t
     st.session_state.exam_analysis_pdf_content = ""
 if 'last_uploaded_exam_pdf_id' not in st.session_state:
     st.session_state.last_uploaded_exam_pdf_id = None
+if 'weak_topics' not in st.session_state: # NEW: Store dynamic list of weak topics
+    st.session_state.weak_topics = []
+if 'focus_quiz_active' not in st.session_state: # NEW: Flag to control focus quiz state
+    st.session_state.focus_quiz_active = False
 
 
 # --- HELPER FUNCTION FOR ROBUST JSON PARSING ---
@@ -292,6 +300,9 @@ def _attempt_quiz_generation(system_prompt, notes_truncated, client):
         )
         return completion.choices[0].message.content
     except Exception as e:
+        # Check for API key error and report it clearly
+        if 'invalid_api_key' in str(e):
+             st.error("❌ API Key Error: Your Groq API key is invalid or expired. Please check your settings in the sidebar.")
         return None
 
 
@@ -325,7 +336,32 @@ def generate_interactive_drills(notes, client):
 
     with st.spinner("Generating general practice drills..."):
         return _attempt_quiz_generation(system_prompt, notes_truncated, client)
-        
+
+def generate_focused_drills(notes, weak_topics, client):
+    """Generates adaptive drills focusing only on weak topics."""
+    
+    topics_list = ", ".join(weak_topics)
+    
+    system_prompt = f"""You are an ADAPTIVE quiz master for technical subjects. Based on the notes, generate a quiz with 10 questions total.
+    These questions MUST ONLY test the following concepts: {topics_list}. Do not include any other concepts.
+    The quiz must consist of a mix of Multiple Choice Questions (MCQs) and True or False Questions (T/F).
+
+    Crucially, for every question, you MUST provide a 'concept_explanation'. This explanation must be a brief (1-2 sentence) summary of the core concept the question is testing, used for instant feedback.
+
+    The entire output MUST be a single JSON object. No other text, markdown, or commentary is allowed outside the JSON structure.
+
+    JSON Format MUST be:
+    {{
+      "quiz_title": "Adaptive Focus Drill (Weak Topics: {topics_list})",
+      "questions": [...]
+    }}
+    """
+    notes_truncated = notes[:15000]
+
+    with st.spinner(f"Generating FOCUS drills on: {topics_list}..."):
+        return _attempt_quiz_generation(system_prompt, notes_truncated, client)
+
+
 def generate_study_notes(raw_text, level, client):
     pages = raw_text.split("--- PAGE_BREAK ---")
     pages = [p for p in pages if len(p.strip()) > 50]
@@ -383,7 +419,6 @@ def generate_qna(notes, q_type, marks, client):
     except Exception as e:
         return f"Error generating Q&A: {e}"
         
-# --- CRITICAL FIX IMPLEMENTATION ---
 def analyze_past_papers(paper_content, client):
     """
     Analyzes past paper content to find key topics and repeated questions.
@@ -435,7 +470,16 @@ def process_and_update_progress(project_name, questions, user_answers):
     for q in valid_questions:
         q_id = q['id']
         # Extract the core concept from the explanation string
-        concept = q['concept_explanation'].split('is ')[-1].split(',')[0].strip().replace('.', '') 
+        # Robustly try to find the core concept
+        try:
+            concept_full = q['concept_explanation'].split('is ')[-1].strip()
+            # Try to get the concept before the first comma, period, or 'which'
+            import re
+            concept_match = re.split(r'[.,]|which', concept_full, 1)[0].strip()
+            concept = concept_match if concept_match else concept_full
+            concept = concept.strip().replace('.', '')
+        except:
+            concept = "Unknown Concept" # Fallback
         
         user_answer = user_answers.get(q_id)
         correct_answer = q['correct_answer']
@@ -594,7 +638,7 @@ def display_and_grade_quiz(project_name, quiz_json_str):
             # THIS IS THE FORM SUBMIT BUTTON
             submit_button = st.form_submit_button(label='✅ Submit Quiz', type="primary", disabled=st.session_state.quiz_submitted)
         with col_reset:
-            reset_button = st.form_submit_button(label='🔄 Reset Quiz', type="secondary")
+            reset_button = st.form_submit_button(label='🔄 Reset Quiz', type="secondary')
 
     if submit_button:
         # --- PROCESS QUIZ RESULTS & UPDATE TRACKER ---
@@ -631,6 +675,11 @@ def display_and_grade_quiz(project_name, quiz_json_str):
         st.success(f"## Final Score: {score}/{total_valid} 🎉")
         if score == total_valid:
             st.balloons()
+            # If the focus quiz was active and user got 100%, disable the focus flag
+            if st.session_state.focus_quiz_active:
+                 st.session_state.focus_quiz_active = False # Mastery achieved!
+                 st.session_state.weak_topics = [] # Clear weak topics
+                 st.info("🎯 **Mastery Achieved!** You scored 100% on the focus drill. All future quizzes will be General until new weak points emerge.")
         
     return
 
@@ -705,6 +754,8 @@ with st.sidebar:
                 st.session_state.exam_analysis_text = None 
                 st.session_state.exam_analysis_pdf_content = "" 
                 st.session_state.last_uploaded_exam_pdf_id = None
+                st.session_state.weak_topics = [] # Reset weak topics on project switch
+                st.session_state.focus_quiz_active = False # Reset focus flag
                 st.rerun()
         st.markdown("---")
                 
@@ -833,19 +884,15 @@ else:
             
             uploaded_pdf = st.file_uploader("Upload Past Paper PDF", type="pdf", key="exam_pdf_uploader")
             
-            # Store extracted content only if a file is uploaded
+            # Logic to handle PDF upload and extraction
             if uploaded_pdf:
-                # Check if the content has already been extracted for the current file
-                # Use the file ID as a simple way to track if extraction is needed
                 if not uploaded_pdf.file_id == st.session_state.get('last_uploaded_exam_pdf_id'):
                     with st.spinner("Extracting text from PDF..."):
                         pdf_text = extract_content_text_only(uploaded_pdf)
                     
-                    # Update session state with the extracted text and file ID
                     st.session_state.exam_analysis_pdf_content = pdf_text
                     st.session_state.last_uploaded_exam_pdf_id = uploaded_pdf.file_id
                     
-                    # 2. Check Extraction Quality and Provide Guidance
                     if len(pdf_text.strip()) < 100:
                         st.warning("⚠️ **Low Text Quality Detected.** This likely means the PDF contains scanned images of questions, which the application cannot read. The analysis will fail unless you upload a digitally created (searchable) PDF.")
                     st.info(f"Loaded **{len(pdf_text)}** characters of text for analysis.")
@@ -860,21 +907,18 @@ else:
                     if len(question_content.strip()) < 100:
                         st.error("The extracted text from the PDF is too short for meaningful analysis. Please check your file.")
                     else:
-                        # **CRITICAL FIX:** Call the simplified function, passing ONLY the question paper content.
                         analysis_result = analyze_past_papers(
                             paper_content=question_content, 
                             client=client
                         )
                         
-                        # Store the result
                         current_hash = hash(question_content)
                         analysis_key = f"analysis_{current_hash}"
                         db.update_exam_analysis_data(project_data['name'], analysis_key, analysis_result)
                         
                         st.session_state.exam_analysis_text = analysis_result
-                        st.rerun() # Rerun to display the result
+                        st.rerun() 
             else:
-                # Clear content if no file is present
                 st.session_state.exam_analysis_pdf_content = ""
                 st.session_state.last_uploaded_exam_pdf_id = None
             
@@ -883,18 +927,13 @@ else:
             # Display stored or generated analysis
             analysis_to_display = st.session_state.get('exam_analysis_text')
             
-            if not analysis_to_display:
-                # Attempt to load the last stored analysis if the session state is empty
-                last_key = next(iter(exam_analysis_data.keys()), None)
-                if last_key:
-                    analysis_to_display = exam_analysis_data.get(last_key)
-                    st.session_state.exam_analysis_text = analysis_to_display
-            
             if analysis_to_display:
                 st.subheader("AI Exam Analysis Report")
                 st.markdown(analysis_to_display)
             else:
                 st.info("Upload a past paper PDF and click 'Run Exam Analysis' to generate a report.")
+                # **REQUIRED FIX:** Ensure this section is empty if no analysis has been run or stored.
+                pass 
 
 
         # --- TAB 2: PRACTICES ---
@@ -954,39 +993,88 @@ else:
                     st.info("Select a generation type above to create your Theory Q&A!")
 
 
-            with sub_tab2: # INTERACTIVE QUIZ (GENERAL ONLY)
-                st.subheader("Interactive Practice Quiz (MCQ & T/F)")
+            with sub_tab2: # INTERACTIVE QUIZ (GENERAL & ADAPTIVE)
+                st.subheader("Adaptive Practice Quiz (MCQ & T/F)")
                 
-                st.info("A new general quiz will be generated every time you click the button below. All results are tracked.")
+                # Dynamic quiz generation options based on weak topics
+                weak_topics = st.session_state.weak_topics
+                
+                if weak_topics and not st.session_state.focus_quiz_active:
+                    st.warning(f"💡 **Recommendation:** We've identified **{len(weak_topics)}** weak topic(s). Focus on these first!")
+                    st.session_state.quiz_type = 'focused' # Default to focused if weak topics exist
+                elif st.session_state.focus_quiz_active:
+                    st.error("🚨 **FOCUS MODE ACTIVE:** You must score 100% on the current Focus Drill to return to General Quizzes.")
+                    st.session_state.quiz_type = 'focused'
+                else:
+                    st.success("🎉 All tested concepts are strong! Ready for a General Quiz.")
+                    st.session_state.quiz_type = 'general' # Default to general
+                
+                # --- QUIZ SELECTION BUTTONS ---
+                col_focus, col_general = st.columns([1, 1])
 
-                if st.button("Generate New General Quiz", type="primary", key="btn_general_drills", use_container_width=True):
-                    
-                    quiz_content = generate_interactive_drills(project_data['notes'], client)
-                    
-                    if quiz_content:
-                        db.update_practice_data(project_data['name'], "interactive_quiz_current", quiz_content)
-                        st.session_state.quiz_data = quiz_content
+                with col_focus:
+                    focus_disabled = not weak_topics and not st.session_state.focus_quiz_active
+                    if st.button(f"Focus Quiz ({len(weak_topics)})", key="btn_focus_select", type="secondary", disabled=focus_disabled, use_container_width=True):
+                        st.session_state.quiz_type = 'focused'
+                        st.session_state.focus_quiz_active = True
+                        st.session_state.quiz_data = None # Clear previous quiz
                         st.session_state.quiz_submitted = False
                         st.session_state.user_answers = {}
-                        st.session_state.quiz_type = 'general' # Always general now
                         st.rerun()
-                    else:
-                        st.error("Quiz generation failed completely. Please check your notes or API key.")
 
+                with col_general:
+                    general_disabled = st.session_state.focus_quiz_active
+                    if st.button("General Quiz (Mixed)", key="btn_general_select", type="secondary", disabled=general_disabled, use_container_width=True):
+                        st.session_state.quiz_type = 'general'
+                        st.session_state.focus_quiz_active = False
+                        st.session_state.quiz_data = None # Clear previous quiz
+                        st.session_state.quiz_submitted = False
+                        st.session_state.user_answers = {}
+                        st.rerun()
+
+                st.markdown("---")
+                
+                # --- GENERATION BUTTON ---
+                if st.session_state.quiz_type == 'focused' and (weak_topics or st.session_state.focus_quiz_active):
+                    # Show generate button for FOCUS QUIZ
+                    if st.button(f"Generate New **FOCUS** Quiz on ({len(weak_topics)} Topics)", type="primary", use_container_width=True, key="btn_generate_focused"):
+                        
+                        quiz_content = generate_focused_drills(project_data['notes'], weak_topics, client)
+                        
+                        if quiz_content:
+                            db.update_practice_data(project_data['name'], "interactive_quiz_current", quiz_content)
+                            st.session_state.quiz_data = quiz_content
+                            st.session_state.quiz_submitted = False
+                            st.session_state.user_answers = {}
+                            st.rerun()
+                        else:
+                            st.error("Focus Quiz generation failed. Check notes/API key.")
+                
+                elif st.session_state.quiz_type == 'general':
+                    # Show generate button for GENERAL QUIZ
+                    if st.button("Generate New **GENERAL** Quiz", type="primary", use_container_width=True, key="btn_generate_general"):
+                        
+                        quiz_content = generate_interactive_drills(project_data['notes'], client)
+                        
+                        if quiz_content:
+                            db.update_practice_data(project_data['name'], "interactive_quiz_current", quiz_content)
+                            st.session_state.quiz_data = quiz_content
+                            st.session_state.quiz_submitted = False
+                            st.session_state.user_answers = {}
+                            st.rerun()
+                        else:
+                            st.error("General Quiz generation failed. Check notes/API key.")
 
                 st.divider()
                 
                 # Load the currently active quiz
-                if st.session_state.quiz_data:
-                    display_and_grade_quiz(project_data['name'], st.session_state.quiz_data)
-                elif practice_data.get('interactive_quiz_current'):
-                    # Load the last generated quiz on session rerun if no active quiz
-                    quiz_content_stored = practice_data.get('interactive_quiz_current')
-                    st.session_state.quiz_data = quiz_content_stored
-                    st.session_state.quiz_type = 'general'
-                    display_and_grade_quiz(project_data['name'], st.session_state.quiz_data)
+                quiz_content_stored = st.session_state.quiz_data or practice_data.get('interactive_quiz_current')
+
+                if quiz_content_stored:
+                    display_and_grade_quiz(project_data['name'], quiz_content_stored)
                 else:
-                    st.info("Click the 'Generate New General Quiz' button above to start your practice.")
+                    st.info("Select a quiz type and click 'Generate' to start your practice.")
+
 
         # --- TAB 3: PROGRESS TRACKER ---
         with tab3:
@@ -994,6 +1082,9 @@ else:
             
             progress_tracker = json.loads(practice_data.get('progress_tracker') or "{}")
             
+            # Reset weak topics list for fresh recalculation
+            current_weak_topics = []
+
             if not progress_tracker:
                 st.info("Attempt the interactive quizzes to start tracking your performance by concept.")
             else:
@@ -1007,12 +1098,15 @@ else:
                     percentage = (correct / total) * 100 if total > 0 else 0
                     
                     status = ""
-                    if total == 0:
-                        status = "Untested"
+                    if total < WEAK_TOPIC_MIN_ATTEMPTS:
+                        status = "Insufficient Attempts (Test More)"
                     elif percentage == 100:
                         status = "Strong Concept 💪"
-                    else: # percentage < 100
+                    elif percentage >= WEAK_TOPIC_ACCURACY_THRESHOLD * 100:
+                        status = "Good Progress 👍"
+                    else: 
                         status = "Weak Point 🚨"
+                        current_weak_topics.append(concept)
                     
                     progress_list.append({
                         "Concept": concept,
@@ -1021,8 +1115,11 @@ else:
                         "Status": status
                     })
                 
-                # Sort by Status (Weak first, then Strong)
-                sorted_progress = sorted(progress_list, key=lambda x: (x['Status'] != "Weak Point 🚨", x['Status'] == "Strong Concept 💪"), reverse=False)
+                # Update the session state with the new list of weak topics
+                st.session_state.weak_topics = current_weak_topics
+
+                # Sort by Status (Weak first)
+                sorted_progress = sorted(progress_list, key=lambda x: (x['Status'] != "Weak Point 🚨", x['Status'] != "Insufficient Attempts (Test More)", x['Accuracy']), reverse=False)
 
                 st.dataframe(
                     sorted_progress,
@@ -1032,12 +1129,19 @@ else:
                 )
                 
                 # Show weak topics for explicit feedback
-                weak_topics_for_display = [p['Concept'] for p in sorted_progress if p['Status'] == "Weak Point 🚨"]
-                
-                if weak_topics_for_display:
-                    st.error(f"### 🚨 Weak Points Identified:\n\nReview the notes and analogies for these weak concepts to improve: \n* " + "\n* ".join(weak_topics_for_display))
+                if st.session_state.weak_topics:
+                    
+                    st.error(f"### 🚨 Weak Points Identified ({len(st.session_state.weak_topics)} Topics):\n\nYour scores show you need more practice on:\n* " + "\n* ".join(st.session_state.weak_topics))
+                    st.markdown("Go to the **Interactive Quiz** tab and select the **Focus Quiz** option to start an adaptive practice session on these specific topics.")
+                    # Automatically set the focus flag if weak topics are found and focus quiz is not already active
+                    if not st.session_state.focus_quiz_active:
+                         st.session_state.focus_quiz_active = True
+                         st.info("Focus Mode Activated. Please switch to the **Interactive Quiz** tab to begin a focused drill.")
+
                 else:
-                    st.success("### Great work! All tested concepts are currently Strong Concepts. Keep up the practice!")
+                    st.success("### Great work! All tested concepts are currently Strong or Good Progress. Continue with General Quizzes!")
+                    st.session_state.focus_quiz_active = False # Ensure focus is off if no weak topics
+
             
     else:
         st.error("⚠️ Error loading project data.")
