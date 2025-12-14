@@ -11,7 +11,7 @@ GROQ_MODEL = "llama-3.1-8b-instant"
 
 # --- CONFIGURABLE THRESHOLDS ---
 WEAK_TOPIC_ACCURACY_THRESHOLD = 0.80 # Below 80% is weak
-WEAK_TOPIC_MIN_ATTEMPTS = 3          # Must be attempted at least 3 times
+WEAK_TOPIC_MIN_ATTEMPTS = 3          # Used for 'Low Data' message, no longer blocks adaptive logic
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="AI Study Companion", page_icon="🎓", layout="wide")
@@ -224,13 +224,13 @@ if 'quiz_type' not in st.session_state:
     st.session_state.quiz_type = 'general'
 if 'exam_analysis_text' not in st.session_state:
     st.session_state.exam_analysis_text = None
-if 'exam_analysis_pdf_content' not in st.session_state: # NEW: Store extracted text from the PDF uploaded for analysis
+if 'exam_analysis_pdf_content' not in st.session_state: 
     st.session_state.exam_analysis_pdf_content = ""
 if 'last_uploaded_exam_pdf_id' not in st.session_state:
     st.session_state.last_uploaded_exam_pdf_id = None
-if 'weak_topics' not in st.session_state: # NEW: Store dynamic list of weak topics
+if 'weak_topics' not in st.session_state: 
     st.session_state.weak_topics = []
-if 'focus_quiz_active' not in st.session_state: # NEW: Flag to control focus quiz state
+if 'focus_quiz_active' not in st.session_state: 
     st.session_state.focus_quiz_active = False
 
 
@@ -310,9 +310,12 @@ def generate_interactive_drills(notes, client):
     """Generates general interactive practice drills (MCQ, T/F) in a strict JSON format."""
     
     system_prompt = """You are a quiz master for technical subjects. Based on the notes provided, generate a quiz with 10 questions total.
+    Crucially, for a **GENERAL QUIZ**, ensure the 10 questions cover the **widest possible range of high-level course topics** present in the notes.
     The quiz must consist of: 5 Multiple Choice Questions (MCQs), each with 4 options (A, B, C, D). 5 True or False Questions (T/F).
 
-    Crucially, for every question, you MUST provide a 'concept_explanation'. This explanation must be a brief (1-2 sentence) summary of the core concept the question is testing, used for instant feedback.
+    For every question, you MUST provide a 'primary_concept' and a 'detailed_explanation'.
+    - The 'primary_concept' must be a **high-level, broad course topic** (e.g., 'Search Algorithms', 'Knowledge Representation', 'Unification'). This is used for score tracking.
+    - The 'detailed_explanation' is the brief feedback (1-2 sentence) for the user.
 
     The entire output MUST be a single JSON object. No other text, markdown, or commentary is allowed outside the JSON structure.
 
@@ -326,7 +329,8 @@ def generate_interactive_drills(notes, client):
           "question_text": "...",
           "options": ["A: ...", "B: ...", "C: ...", "D: ..."],
           "correct_answer": "B", 
-          "concept_explanation": "The core concept being tested is X, which..."
+          "primary_concept": "Search Algorithms", 
+          "detailed_explanation": "A* search is an informed search algorithm..."
         },
         {...}
       ]
@@ -346,7 +350,9 @@ def generate_focused_drills(notes, weak_topics, client):
     These questions MUST ONLY test the following concepts: {topics_list}. Do not include any other concepts.
     The quiz must consist of a mix of Multiple Choice Questions (MCQs) and True or False Questions (T/F).
 
-    Crucially, for every question, you MUST provide a 'concept_explanation'. This explanation must be a brief (1-2 sentence) summary of the core concept the question is testing, used for instant feedback.
+    For every question, you MUST provide a 'primary_concept' and a 'detailed_explanation'.
+    - The 'primary_concept' MUST be one of the specified weak topics: {topics_list}.
+    - The 'detailed_explanation' is the brief feedback (1-2 sentence) for the user.
 
     The entire output MUST be a single JSON object. No other text, markdown, or commentary is allowed outside the JSON structure.
 
@@ -460,26 +466,18 @@ def analyze_past_papers(paper_content, client):
 def process_and_update_progress(project_name, questions, user_answers):
     """
     Processes the quiz results, extracts concepts, and updates the database tracker.
-    Updates progress based on any attempt.
+    Uses 'primary_concept' for robust, high-level tracking.
     """
     concept_scores = {} # {concept: [correct_count, total_count]}
     
     # Filter for valid questions before processing
-    valid_questions = [q for q in questions if isinstance(q, dict) and 'options' in q and 'id' in q and 'concept_explanation' in q]
+    valid_questions = [q for q in questions if isinstance(q, dict) and 'id' in q and 'primary_concept' in q]
 
     for q in valid_questions:
         q_id = q['id']
-        # Extract the core concept from the explanation string
-        # Robustly try to find the core concept
-        try:
-            concept_full = q['concept_explanation'].split('is ')[-1].strip()
-            # Try to get the concept before the first comma, period, or 'which'
-            import re
-            concept_match = re.split(r'[.,]|which', concept_full, 1)[0].strip()
-            concept = concept_match if concept_match else concept_full
-            concept = concept.strip().replace('.', '')
-        except:
-            concept = "Unknown Concept" # Fallback
+        
+        # *** FIX for granularity: Use the high-level primary_concept directly ***
+        concept = q.get('primary_concept', 'Unknown Concept - Check Quiz Data') 
         
         user_answer = user_answers.get(q_id)
         correct_answer = q['correct_answer']
@@ -536,9 +534,13 @@ def display_and_grade_quiz(project_name, quiz_json_str):
             q_id = q['id']
             question_key = f"q_{q_id}"
             
+            # Get concept for display
+            concept_display = q.get('primary_concept', 'General Concept')
+            detailed_explanation = q.get('detailed_explanation', 'No detailed explanation provided.')
+            
             # Question rendering
             with st.container():
-                st.markdown(f"**Question {q_id}:** {q['question_text']}")
+                st.markdown(f"**Question {q_id} ({concept_display}):** {q['question_text']}")
                 
                 options = q['options'] 
                 user_choice = None
@@ -592,7 +594,6 @@ def display_and_grade_quiz(project_name, quiz_json_str):
             if st.session_state.quiz_submitted:
                 
                 correct_answer = q['correct_answer']
-                concept_explanation = q['concept_explanation']
                 
                 # Determine the displayed correct answer
                 if q['type'] == 'T/F':
@@ -624,7 +625,7 @@ def display_and_grade_quiz(project_name, quiz_json_str):
                         <p class="incorrect">❌ **INCORRECT.**</p>
                         <p><strong>Your Choice:</strong> {user_selected}</p>
                         <p><strong>Correct Answer:</strong> {correct_display}</p>
-                        <p><strong>Concept Review:</strong> {concept_explanation}</p>
+                        <p><strong>Concept Review:</strong> {detailed_explanation}</p>
                     </div>
                     '''
                 
@@ -638,7 +639,7 @@ def display_and_grade_quiz(project_name, quiz_json_str):
             # THIS IS THE FORM SUBMIT BUTTON
             submit_button = st.form_submit_button(label='✅ Submit Quiz', type="primary", disabled=st.session_state.quiz_submitted)
         with col_reset:
-            # CORRECTED SYNTAX: Added the closing double quote for type="secondary"
+            # CORRECTED SYNTAX: Added the closing double quote
             reset_button = st.form_submit_button(label='🔄 Reset Quiz', type="secondary")
 
     if submit_button:
@@ -878,6 +879,7 @@ else:
         # --- TAB: EXAM ANALYSIS (FINAL REVISION) ---
         with tab_exam:
             st.header("📈 Past Paper & Question Bank Analysis")
+            # Set this section to be empty until analysis is run, as requested previously
             st.markdown("""
                 Upload a past paper or question bank PDF below.
                 The AI will analyze the **extracted text** from the PDF to identify key trends and repeated questions.
@@ -932,7 +934,6 @@ else:
                 st.subheader("AI Exam Analysis Report")
                 st.markdown(analysis_to_display)
             else:
-                # This section is now empty until a user runs an analysis, as requested.
                 st.info("Upload a past paper PDF and click 'Run Exam Analysis' to generate a report.")
 
 
@@ -1088,7 +1089,7 @@ else:
             if not progress_tracker:
                 st.info("Attempt the interactive quizzes to start tracking your performance by concept.")
             else:
-                st.subheader("Performance Breakdown by Concept")
+                st.subheader("Performance Breakdown by Concept (High-Level Topics)")
                 
                 # Prepare data for display
                 progress_list = []
@@ -1098,16 +1099,24 @@ else:
                     percentage = (correct / total) * 100 if total > 0 else 0
                     
                     status = ""
-                    if total < WEAK_TOPIC_MIN_ATTEMPTS:
-                        status = "Insufficient Attempts (Test More)"
+                    
+                    # *** REFINED ADAPTIVE LOGIC: Flag as weak if accuracy is low, regardless of attempts ***
+                    if percentage < WEAK_TOPIC_ACCURACY_THRESHOLD * 100:
+                        status = "Weak Point 🚨"
+                        current_weak_topics.append(concept)
                     elif percentage == 100:
                         status = "Strong Concept 💪"
                     elif percentage >= WEAK_TOPIC_ACCURACY_THRESHOLD * 100:
                         status = "Good Progress 👍"
-                    else: 
-                        status = "Weak Point 🚨"
-                        current_weak_topics.append(concept)
-                    
+                        
+                    # Add Low Data warning separately
+                    if total < WEAK_TOPIC_MIN_ATTEMPTS:
+                        # Only add this if the topic isn't already marked as weak (for cleaner display)
+                        if "Weak Point" not in status:
+                             status = "New/Low Data (Test More) 💡"
+                        else:
+                             status += " (Low Data)"
+
                     progress_list.append({
                         "Concept": concept,
                         "Accuracy": f"{percentage:.1f}%",
@@ -1119,7 +1128,7 @@ else:
                 st.session_state.weak_topics = current_weak_topics
 
                 # Sort by Status (Weak first)
-                sorted_progress = sorted(progress_list, key=lambda x: (x['Status'] != "Weak Point 🚨", x['Status'] != "Insufficient Attempts (Test More)", x['Accuracy']), reverse=False)
+                sorted_progress = sorted(progress_list, key=lambda x: (x['Status'] != "Weak Point 🚨", x['Status'] != "New/Low Data (Test More) 💡", x['Accuracy']), reverse=False)
 
                 st.dataframe(
                     sorted_progress,
@@ -1132,10 +1141,12 @@ else:
                 if st.session_state.weak_topics:
                     
                     st.error(f"### 🚨 Weak Points Identified ({len(st.session_state.weak_topics)} Topics):\n\nYour scores show you need more practice on:\n* " + "\n* ".join(st.session_state.weak_topics))
-                    st.markdown("Go to the **Interactive Quiz** tab and select the **Focus Quiz** option to start an adaptive practice session on these specific topics.")
-                    # Automatically set the focus flag if weak topics are found and focus quiz is not already active
+                    st.markdown("Go to the **Interactive Quiz** tab and select the **Focus Quiz** option to start an adaptive practice session on these specific topics. **This will be the default quiz type until mastery is achieved.**")
+                    
+                    # Ensure focus is automatically activated for aggressive adaptation
                     if not st.session_state.focus_quiz_active:
                          st.session_state.focus_quiz_active = True
+                         st.session_state.quiz_data = None # Clear current quiz to force new focused one
                          st.info("Focus Mode Activated. Please switch to the **Interactive Quiz** tab to begin a focused drill.")
 
                 else:
