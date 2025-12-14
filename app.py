@@ -320,6 +320,9 @@ def _attempt_quiz_generation(system_prompt, notes_truncated, client):
         # Check for API key error and report it clearly
         if 'invalid_api_key' in str(e):
              st.error("❌ API Key Error: Your Groq API key is invalid or expired. Please check your settings in the sidebar.")
+        # Specific Groq error handling (e.g., context window exceeded, though unlikely at 15k)
+        if 'context_length' in str(e):
+             st.error("❌ Context Length Error: The notes provided are too long for the model, even after truncation. Please simplify your notes.")
         return None
 
 
@@ -359,29 +362,51 @@ def generate_interactive_drills(notes, client):
         return _attempt_quiz_generation(system_prompt, notes_truncated, client)
 
 def generate_focused_drills(notes, weak_topics, client):
-    """Generates adaptive drills focusing only on weak topics."""
+    """
+    Generates adaptive drills focusing only on weak topics.
+    HARDENED PROMPT to prevent silent generation failure.
+    """
     
-    topics_list = ", ".join(weak_topics)
+    topics_list_str = ", ".join(weak_topics)
     
+    # -------------------------------------------------------------------------
+    # --- HARDENED SYSTEM PROMPT FOR FOCUS QUIZ ---
     system_prompt = f"""You are an ADAPTIVE quiz master for technical subjects. Based on the notes, generate a quiz with 10 questions total.
-    These questions MUST ONLY test the following concepts: {topics_list}. Do not include any other concepts.
-    The quiz must consist of a mix of Multiple Choice Questions (MCQs) and True or False Questions (T/F).
+    
+    ***STRICT INSTRUCTION:*** The 10 questions MUST ONLY test the following concepts. You must use these terms verbatim:
+    WEAK TOPICS: {topics_list_str}
+    
+    The quiz must consist of a mix of Multiple Choice Questions (MCQs) and True or False Questions (T/F). Be concise in your questions and explanations.
 
     For every question, you MUST provide a 'primary_concept' and a 'detailed_explanation'.
-    - The 'primary_concept' MUST be **one exact match** from the specified weak topics list: {topics_list}. **DO NOT ALTER THESE TERMS.** This is crucial for clean score tracking.
+    - The 'primary_concept' MUST be **one exact match** from the list: {topics_list_str}. **DO NOT ALTER OR ADD TO THESE TERMS.** This is crucial for clean score tracking.
     - The 'detailed_explanation' is the brief feedback (1-2 sentence) for the user.
 
     The entire output MUST be a single JSON object. No other text, markdown, or commentary is allowed outside the JSON structure.
 
     JSON Format MUST be:
     {{
-      "quiz_title": "Adaptive Focus Drill (Weak Topics: {topics_list})",
-      "questions": [...]
+      "quiz_title": "Adaptive Focus Drill (Weak Topics: {topics_list_str})",
+      "questions": [
+        {{
+          "id": 1,
+          "type": "MCQ",
+          "question_text": "...",
+          "options": ["A: ...", "B: ...", "C: ...", "D: ..."],
+          "correct_answer": "B", 
+          "primary_concept": "{weak_topics[0] if weak_topics else 'Concept'}", 
+          "detailed_explanation": "..."
+        }},
+        // ... 9 more questions
+      ]
     }}
     """
+    # -------------------------------------------------------------------------
+    
     notes_truncated = notes[:15000]
 
-    with st.spinner(f"Generating FOCUS drills on: {topics_list}..."):
+    with st.spinner(f"Generating FOCUS drills on: {topics_list_str}..."):
+        # The internal helper _attempt_quiz_generation handles the API call
         return _attempt_quiz_generation(system_prompt, notes_truncated, client)
 
 
