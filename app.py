@@ -1017,7 +1017,16 @@ else:
                 # Dynamic quiz generation options based on weak topics
                 weak_topics = st.session_state.weak_topics
                 
-                if weak_topics and not st.session_state.focus_quiz_active:
+                # *** NEW CHECK FOR CORRUPTED TOPICS ***
+                is_data_corrupted = any(len(t) > 50 for t in weak_topics) # A single topic name should not be > 50 chars
+                
+                if is_data_corrupted:
+                    st.error("🚨 **CRITICAL DATA ERROR:** Your progress tracker contains corrupted topic names (long sentences/descriptions from old quizzes). The Focus Quiz cannot be generated until this is fixed.")
+                    st.markdown("⚠️ **Action Required:** Switch to the **📊 Progress Tracker** tab and click the **⚠️ Clear Progress Data** button to wipe the bad history and enable the Focus Quiz.")
+                    st.session_state.focus_quiz_active = False # Disable focus mode until clean
+                    st.session_state.quiz_type = 'general' # Force general fallback
+                
+                elif weak_topics and not st.session_state.focus_quiz_active:
                     st.warning(f"💡 **Recommendation:** We've identified **{len(weak_topics)}** weak topic(s). Focus on these first!")
                     st.session_state.quiz_type = 'focused' # Default to focused if weak topics exist
                 elif st.session_state.focus_quiz_active:
@@ -1031,7 +1040,7 @@ else:
                 col_focus, col_general = st.columns([1, 1])
 
                 with col_focus:
-                    focus_disabled = not weak_topics and not st.session_state.focus_quiz_active
+                    focus_disabled = not weak_topics and not st.session_state.focus_quiz_active or is_data_corrupted
                     if st.button(f"Focus Quiz ({len(weak_topics)})", key="btn_focus_select", type="secondary", disabled=focus_disabled, use_container_width=True):
                         st.session_state.quiz_type = 'focused'
                         st.session_state.focus_quiz_active = True
@@ -1053,7 +1062,7 @@ else:
                 st.markdown("---")
                 
                 # --- GENERATION BUTTON ---
-                if st.session_state.quiz_type == 'focused' and (weak_topics or st.session_state.focus_quiz_active):
+                if st.session_state.quiz_type == 'focused' and (weak_topics or st.session_state.focus_quiz_active) and not is_data_corrupted:
                     # Show generate button for FOCUS QUIZ
                     if st.button(f"Generate New **FOCUS** Quiz on ({len(weak_topics)} Topics)", type="primary", use_container_width=True, key="btn_generate_focused"):
                         
@@ -1066,9 +1075,9 @@ else:
                             st.session_state.user_answers = {}
                             st.rerun()
                         else:
-                            st.error("Focus Quiz generation failed. Check notes/API key.")
+                            st.error("Focus Quiz generation failed. Please try a General Quiz or ensure your API key is correct.")
                 
-                elif st.session_state.quiz_type == 'general':
+                elif st.session_state.quiz_type == 'general' and not is_data_corrupted:
                     # Show generate button for GENERAL QUIZ
                     if st.button("Generate New **GENERAL** Quiz", type="primary", use_container_width=True, key="btn_generate_general"):
                         
@@ -1088,9 +1097,9 @@ else:
                 # Load the currently active quiz
                 quiz_content_stored = st.session_state.quiz_data or practice_data.get('interactive_quiz_current')
 
-                if quiz_content_stored:
+                if quiz_content_stored and not is_data_corrupted:
                     display_and_grade_quiz(project_data['name'], quiz_content_stored)
-                else:
+                elif not is_data_corrupted:
                     st.info("Select a quiz type and click 'Generate' to start your practice.")
 
 
@@ -1101,7 +1110,7 @@ else:
             progress_tracker = json.loads(practice_data.get('progress_tracker') or "{}")
             
             # Reset button for progress tracker
-            if st.button("⚠️ Clear Progress Data", type="secondary", help="This will delete all your quiz scores and progress history for this project. Use this to reset the adaptive logic after a code update."):
+            if st.button("⚠️ Clear Progress Data", type="secondary", help="This will delete all your quiz scores and progress history for this project. Use this to reset the adaptive logic after a code update or data corruption."):
                 db.reset_progress_tracker(project_data['name'])
                 st.session_state.weak_topics = []
                 st.session_state.focus_quiz_active = False
@@ -1114,6 +1123,7 @@ else:
             
             # Reset weak topics list for fresh recalculation
             current_weak_topics = []
+            is_corrupted_in_tracker = False
 
             if not progress_tracker:
                 st.info("Attempt the interactive quizzes to start tracking your performance by concept.")
@@ -1127,24 +1137,28 @@ else:
                     correct = stats['correct']
                     percentage = (correct / total) * 100 if total > 0 else 0
                     
-                    status = ""
-                    
-                    # *** REFINED ADAPTIVE LOGIC: Flag as weak if accuracy is low, regardless of attempts ***
-                    if percentage < WEAK_TOPIC_ACCURACY_THRESHOLD * 100:
-                        status = "Weak Point 🚨"
-                        current_weak_topics.append(concept)
-                    elif percentage == 100:
-                        status = "Strong Concept 💪"
-                    elif percentage >= WEAK_TOPIC_ACCURACY_THRESHOLD * 100:
-                        status = "Good Progress 👍"
+                    # Check for corruption here as well
+                    if len(concept) > 50:
+                        is_corrupted_in_tracker = True
+                        status = "❗ CORRUPTED DATA"
+                    else:
+                        status = ""
                         
-                    # Add Low Data warning separately
-                    if total < WEAK_TOPIC_MIN_ATTEMPTS:
-                        # Only add this if the topic isn't already marked as weak (for cleaner display)
-                        if "Weak Point" not in status:
-                             status = "New/Low Data (Test More) 💡"
-                        else:
-                             status += " (Low Data)"
+                        # Apply adaptive logic only if data is clean
+                        if percentage < WEAK_TOPIC_ACCURACY_THRESHOLD * 100:
+                            status = "Weak Point 🚨"
+                            current_weak_topics.append(concept)
+                        elif percentage == 100:
+                            status = "Strong Concept 💪"
+                        elif percentage >= WEAK_TOPIC_ACCURACY_THRESHOLD * 100:
+                            status = "Good Progress 👍"
+                            
+                        # Add Low Data warning separately
+                        if total < WEAK_TOPIC_MIN_ATTEMPTS:
+                            if "Weak Point" not in status:
+                                 status = "New/Low Data (Test More) 💡"
+                            else:
+                                 status += " (Low Data)"
 
                     progress_list.append({
                         "Concept": concept,
@@ -1156,8 +1170,8 @@ else:
                 # Update the session state with the new list of weak topics
                 st.session_state.weak_topics = current_weak_topics
 
-                # Sort by Status (Weak first)
-                sorted_progress = sorted(progress_list, key=lambda x: (x['Status'] != "Weak Point 🚨", x['Status'] != "New/Low Data (Test More) 💡", x['Accuracy']), reverse=False)
+                # Sort by Status (Corrupted first, then Weak)
+                sorted_progress = sorted(progress_list, key=lambda x: (x['Status'] != "❗ CORRUPTED DATA", x['Status'] != "Weak Point 🚨", x['Status'] != "New/Low Data (Test More) 💡", x['Accuracy']), reverse=False)
 
                 st.dataframe(
                     sorted_progress,
@@ -1167,7 +1181,10 @@ else:
                 )
                 
                 # Show weak topics for explicit feedback
-                if st.session_state.weak_topics:
+                if is_corrupted_in_tracker:
+                    st.error("### 🚨 CORRUPTED DATA DETECTED! You must click the '⚠️ Clear Progress Data' button above to fix the broken topic list and enable the Focus Quiz.")
+                    st.session_state.focus_quiz_active = False
+                elif st.session_state.weak_topics:
                     
                     st.error(f"### 🚨 Weak Points Identified ({len(st.session_state.weak_topics)} Topics):\n\nYour scores show you need more practice on:\n* " + "\n* ".join(st.session_state.weak_topics))
                     st.markdown("Go to the **Interactive Quiz** tab and select the **Focus Quiz** option to start an adaptive practice session on these specific topics. **This will be the default quiz type until mastery is achieved.**")
