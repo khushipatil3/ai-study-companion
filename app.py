@@ -203,6 +203,23 @@ class StudyDB:
         conn.commit()
         conn.close()
 
+    def reset_progress_tracker(self, project_name):
+        """Clears the progress_tracker field for a given project."""
+        project_data = self.get_project_details(project_name)
+        if not project_data:
+            return
+            
+        practice_dict = json.loads(project_data.get('practice_data') or "{}")
+        practice_dict['progress_tracker'] = json.dumps({}) # Set tracker to empty JSON
+        
+        conn = self.connect()
+        c = conn.cursor()
+        c.execute('''
+            UPDATE projects SET practice_data = ? WHERE name = ?
+        ''', (json.dumps(practice_dict), project_name))
+        conn.commit()
+        conn.close()
+        
 
 db = StudyDB() # Initialize DB
 
@@ -314,7 +331,7 @@ def generate_interactive_drills(notes, client):
     The quiz must consist of: 5 Multiple Choice Questions (MCQs), each with 4 options (A, B, C, D). 5 True or False Questions (T/F).
 
     For every question, you MUST provide a 'primary_concept' and a 'detailed_explanation'.
-    - The 'primary_concept' must be a **high-level, broad course topic** (e.g., 'Search Algorithms', 'Knowledge Representation', 'Unification'). This is used for score tracking.
+    - The 'primary_concept' MUST be a **single, short, high-level canonical term** from the notes (e.g., 'A* Search', 'Supervised Learning', 'Logistic Regression'). **DO NOT USE SENTENCES OR LONG DESCRIPTIONS.** This is crucial for clean score tracking.
     - The 'detailed_explanation' is the brief feedback (1-2 sentence) for the user.
 
     The entire output MUST be a single JSON object. No other text, markdown, or commentary is allowed outside the JSON structure.
@@ -351,7 +368,7 @@ def generate_focused_drills(notes, weak_topics, client):
     The quiz must consist of a mix of Multiple Choice Questions (MCQs) and True or False Questions (T/F).
 
     For every question, you MUST provide a 'primary_concept' and a 'detailed_explanation'.
-    - The 'primary_concept' MUST be one of the specified weak topics: {topics_list}.
+    - The 'primary_concept' MUST be **one exact match** from the specified weak topics list: {topics_list}. **DO NOT ALTER THESE TERMS.** This is crucial for clean score tracking.
     - The 'detailed_explanation' is the brief feedback (1-2 sentence) for the user.
 
     The entire output MUST be a single JSON object. No other text, markdown, or commentary is allowed outside the JSON structure.
@@ -639,7 +656,7 @@ def display_and_grade_quiz(project_name, quiz_json_str):
             # THIS IS THE FORM SUBMIT BUTTON
             submit_button = st.form_submit_button(label='✅ Submit Quiz', type="primary", disabled=st.session_state.quiz_submitted)
         with col_reset:
-            # CORRECTED SYNTAX: Added the closing double quote
+            # CORRECTED SYNTAX
             reset_button = st.form_submit_button(label='🔄 Reset Quiz', type="secondary")
 
     if submit_button:
@@ -894,7 +911,7 @@ else:
                         pdf_text = extract_content_text_only(uploaded_pdf)
                     
                     st.session_state.exam_analysis_pdf_content = pdf_text
-                    st.session_state.last_uploaded_exam_pdf_id = uploaded_pdf.file_id
+                    st.session_state.last_uploaded_exam_pdf_id = uploaded_file.file_id
                     
                     if len(pdf_text.strip()) < 100:
                         st.warning("⚠️ **Low Text Quality Detected.** This likely means the PDF contains scanned images of questions, which the application cannot read. The analysis will fail unless you upload a digitally created (searchable) PDF.")
@@ -1082,6 +1099,18 @@ else:
             st.header("📊 Study Progress Tracker")
             
             progress_tracker = json.loads(practice_data.get('progress_tracker') or "{}")
+            
+            # Reset button for progress tracker
+            if st.button("⚠️ Clear Progress Data", type="secondary", help="This will delete all your quiz scores and progress history for this project. Use this to reset the adaptive logic after a code update."):
+                db.reset_progress_tracker(project_data['name'])
+                st.session_state.weak_topics = []
+                st.session_state.focus_quiz_active = False
+                st.session_state.quiz_data = None
+                st.session_state.quiz_submitted = False
+                st.info("✅ Progress tracker data cleared successfully. Please start a new General Quiz.")
+                st.rerun()
+            
+            st.markdown("---")
             
             # Reset weak topics list for fresh recalculation
             current_weak_topics = []
