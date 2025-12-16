@@ -144,9 +144,12 @@ def generate_content(prompt, client, is_json=False):
     try:
         resp = client.chat.completions.create(
             model=GROQ_MODEL,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[
+                {"role": "system", "content": "You are a strict academic assistant. You generate content based ONLY on the provided user context. You never hallucinate or use external general knowledge."},
+                {"role": "user", "content": prompt}
+            ],
             response_format={"type": "json_object"} if is_json else None,
-            temperature=0.7
+            temperature=0.3 # Lower temperature for higher factual accuracy
         )
         return resp.choices[0].message.content
     except Exception as e:
@@ -200,7 +203,7 @@ if app_mode == "Create":
         if st.button("✨ Initialize Unit"):
             with st.spinner("Processing..."):
                 raw = extract_pdf_text(uploaded_file)
-                notes = generate_content(f"Act as a teacher. Level: {level}. Create comprehensive study notes for: {raw[:15000]}", client)
+                notes = generate_content(f"Extract and summarize the key information from these notes in an organized markdown format. Detail Level: {level}. NOTES: {raw[:15000]}", client)
                 db.save_project(proj_name, level, notes, raw)
                 st.session_state.current_project = proj_name
                 st.rerun()
@@ -221,10 +224,10 @@ elif st.session_state.current_project:
         
         st.divider()
         c1, c2 = st.columns(2)
-        with c1: st.info("### 📖 Knowledge Base\nReview your notes.")
+        with c1: st.info("### 📖 Knowledge Base\nReview your synthesized notes and analogies.")
         with c2: 
-            if weak: st.error(f"### 🎯 Targeted Focus\nYou have {len(weak)} weak topics.")
-            else: st.success("### ✅ Ready for Practice")
+            if weak: st.error(f"### 🎯 Targeted Focus\nYou have {len(weak)} weak topics. Start a Focus Quiz now.")
+            else: st.success("### ✅ Ready for Practice\nAll concepts look strong. Try a general drill!")
 
     elif app_mode == "📖 Study Materials":
         st.title("📖 Knowledge Base")
@@ -232,7 +235,7 @@ elif st.session_state.current_project:
         with t1: st.markdown(data['notes'])
         with t2:
             if st.button("🔄 Generate Analogies"):
-                ana = generate_content(f"Create 5 analogies for: {data['notes'][:5000]}", client)
+                ana = generate_content(f"Create 5 real-world analogies based STRICTLY on the content of these study notes: {data['notes'][:5000]}", client)
                 db.update_project_field(data['name'], 'analogy_data', 'current', ana)
                 st.rerun()
             st.markdown(json.loads(data['analogy_data']).get('current', 'No analogies yet.'))
@@ -243,11 +246,22 @@ elif st.session_state.current_project:
         
         col_gen, col_foc = st.columns(2)
         if col_gen.button("🎲 Generate General Quiz"):
-            st.session_state.quiz_data = generate_content("Generate 10 MCQ JSON questions. Format: {'questions': [{'id':1,'question_text':'','options':['A','B'],'correct_answer':'A','primary_concept':'','detailed_explanation':''}]}", client, is_json=True)
+            prompt = f"""
+            Generate 10 MCQ/TF JSON questions based STRICTLY and ONLY on the following study notes. 
+            Do not include general knowledge.
+            NOTES: {data['notes'][:10000]}
+            FORMAT: {{'questions': [{{'id':1,'question_text':'','options':['A','B','C','D'],'correct_answer':'A','primary_concept':'Topic Title','detailed_explanation':''}}]}}
+            """
+            st.session_state.quiz_data = generate_content(prompt, client, is_json=True)
             st.session_state.quiz_submitted = False; st.session_state.user_answers = {}; st.rerun()
             
         if weak and col_foc.button(f"🎯 Generate Focus Quiz ({len(weak)})"):
-            st.session_state.quiz_data = generate_content(f"Generate 10 MCQ JSON questions focusing on: {', '.join(weak)}", client, is_json=True)
+            prompt = f"""
+            Generate 10 MCQ/TF JSON questions strictly focusing ONLY on these specific topics: {', '.join(weak)}.
+            Use this context for question details: {data['notes'][:5000]}
+            FORMAT: {{'questions': [...]}}
+            """
+            st.session_state.quiz_data = generate_content(prompt, client, is_json=True)
             st.session_state.quiz_submitted = False; st.session_state.user_answers = {}; st.rerun()
 
         if st.session_state.quiz_data:
@@ -257,7 +271,6 @@ elif st.session_state.current_project:
                     ans_map = {}
                     for i, q in enumerate(q_json['questions']):
                         st.markdown(f"**Q{i+1}:** {q['question_text']}")
-                        # index=None ensures no radio button is pre-selected
                         ans_map[q['id']] = st.radio("Choose:", q['options'], index=None, key=f"q_{q['id']}")
                     
                     if st.form_submit_button("Submit Quiz"):
@@ -267,7 +280,6 @@ elif st.session_state.current_project:
                         db.update_progress_tracker(data['name'], scores)
                         st.rerun()
             
-            # RESULTS DISPLAY AFTER SUBMISSION
             elif st.session_state.quiz_submitted:
                 st.header("🏁 Quiz Results")
                 score = 0
@@ -302,4 +314,4 @@ elif st.session_state.current_project:
             st.table(rows)
             if st.button("🗑️ Clear Data"): db.reset_progress_tracker(data['name']); st.rerun()
 
-else: st.warning("Configure API and select project.")
+else: st.warning("Please configure your Groq API Key and select or create a project to begin.")
