@@ -108,14 +108,37 @@ class StudyDB:
 
 db = StudyDB()
 
-# --- HELPER FUNCTIONS ---
+# --- HARDENED JSON PARSER ---
 def safe_json_parse(json_str):
-    if not json_str: return None
+    if not json_str: 
+        return None
     try:
-        start, end = json_str.find('{'), json_str.rfind('}')
-        if start == -1: return json.loads(json_str.strip())
-        return json.loads(json_str[start:end+1].replace('```json', '').replace('```', '').strip())
-    except: return None
+        # Strip markdown fences and clean whitespace
+        clean_str = json_str.replace('```json', '').replace('```', '').strip()
+        
+        # Extract only content between first { and last } to remove conversational noise
+        start = clean_str.find('{')
+        end = clean_str.rfind('}')
+        if start != -1 and end != -1:
+            clean_str = clean_str[start:end+1]
+        
+        parsed = json.loads(clean_str)
+        
+        # Validate that 'questions' key exists
+        if isinstance(parsed, dict) and "questions" in parsed:
+            return parsed
+        # Fallback if the AI returned a direct list of questions
+        elif isinstance(parsed, list):
+            return {"questions": parsed}
+        # Fallback if the AI used a different key like 'quiz'
+        elif isinstance(parsed, dict):
+            for key in parsed.keys():
+                if isinstance(parsed[key], list):
+                    return {"questions": parsed[key]}
+            
+        return None
+    except Exception:
+        return None
 
 def extract_pdf_text(uploaded_file):
     doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
@@ -233,29 +256,37 @@ elif st.session_state.current_project:
         
         col_gen, col_foc = st.columns(2)
         if col_gen.button("🎲 Generate General Quiz"):
-            st.session_state.quiz_data = generate_content(f"Generate 10 MCQ/TF JSON questions based on: {data['notes'][:10000]}. Format: {{'questions': [{{'id':1,'type':'MCQ','question_text':'','options':['A','B','C','D'],'correct_answer':'A','primary_concept':'','detailed_explanation':''}}]}}", client, is_json=True)
+            st.session_state.quiz_data = generate_content(f"Generate 10 MCQ/TF JSON questions based on: {data['notes'][:10000]}. Format strictly as: {{'questions': [{{'id':1,'type':'MCQ','question_text':'','options':['A','B','C','D'],'correct_answer':'A','primary_concept':'','detailed_explanation':''}}]}}", client, is_json=True)
             st.session_state.quiz_submitted = False; st.rerun()
             
         if weak and col_foc.button(f"🎯 Generate Focus Quiz ({len(weak)})"):
-            st.session_state.quiz_data = generate_content(f"Generate 10 MCQ/TF JSON questions strictly focusing ONLY on: {', '.join(weak)}. Context: {data['notes'][:5000]}", client, is_json=True)
+            st.session_state.quiz_data = generate_content(f"Generate 10 MCQ/TF JSON questions strictly focusing ONLY on: {', '.join(weak)}. Context: {data['notes'][:5000]}. Format strictly as: {{'questions': [...]}}", client, is_json=True)
             st.session_state.quiz_submitted = False; st.rerun()
 
         if st.session_state.quiz_data:
             q_json = safe_json_parse(st.session_state.quiz_data)
-            if q_json:
+            
+            if q_json and "questions" in q_json:
                 with st.form("quiz_form"):
                     ans_map = {}
                     for i, q in enumerate(q_json['questions']):
-                        st.markdown(f"**Q{i+1}:** {q['question_text']} *({q['primary_concept']})*")
-                        ans_map[q['id']] = st.radio("Choose:", q['options'], key=f"q_{q['id']}")
+                        st.markdown(f"**Q{i+1}:** {q.get('question_text', 'N/A')} *({q.get('primary_concept', 'Concept')})*")
+                        ans_map[q.get('id', i)] = st.radio("Choose:", q.get('options', []), key=f"q_{q.get('id', i)}")
                         st.divider()
+                    
                     if st.form_submit_button("Submit Answers"):
                         st.session_state.quiz_submitted = True
-                        scores = {q['primary_concept']: (1 if ans_map[q['id']] == q['correct_answer'] else 0, 1) for q in q_json['questions']}
+                        scores = {q.get('primary_concept', 'Concept'): (1 if ans_map[q.get('id', i)] == q.get('correct_answer') else 0, 1) for i, q in enumerate(q_json['questions'])}
                         db.update_progress_tracker(data['name'], scores)
                         st.rerun()
+                
                 if st.session_state.quiz_submitted:
                     st.success("Results updated! Check the Mastery Tracker.")
+            else:
+                st.error("The quiz was generated but the format was invalid. Please try generating it again.")
+                if st.button("Retry Generation"):
+                    st.session_state.quiz_data = None
+                    st.rerun()
 
     elif app_mode == "📊 Mastery Tracker":
         st.title("📊 Concept Mastery")
