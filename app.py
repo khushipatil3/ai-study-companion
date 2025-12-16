@@ -110,12 +110,10 @@ db = StudyDB()
 
 # --- HARDENED JSON PARSER ---
 def safe_json_parse(json_str):
-    if not json_str: 
-        return None
+    if not json_str: return None
     try:
         clean_str = json_str.replace('```json', '').replace('```', '').strip()
-        start = clean_str.find('{')
-        end = clean_str.rfind('}')
+        start, end = clean_str.find('{'), clean_str.rfind('}')
         if start != -1 and end != -1:
             clean_str = clean_str[start:end+1]
         parsed = json.loads(clean_str)
@@ -124,8 +122,7 @@ def safe_json_parse(json_str):
         elif isinstance(parsed, list):
             return {"questions": parsed}
         return None
-    except:
-        return None
+    except: return None
 
 def extract_pdf_text(uploaded_file):
     doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
@@ -145,11 +142,11 @@ def generate_content(prompt, client, is_json=False):
         resp = client.chat.completions.create(
             model=GROQ_MODEL,
             messages=[
-                {"role": "system", "content": "You are a strict academic assistant. You generate content based ONLY on the provided user context. You never hallucinate or use external general knowledge."},
+                {"role": "system", "content": "You are a strict academic assistant. You generate technical quiz content in JSON format. You NEVER skip fields or leave them empty."},
                 {"role": "user", "content": prompt}
             ],
             response_format={"type": "json_object"} if is_json else None,
-            temperature=0.3 
+            temperature=0.2 
         )
         return resp.choices[0].message.content
     except Exception as e:
@@ -213,7 +210,8 @@ elif st.session_state.current_project:
     
     if app_mode == "📈 Dashboard":
         st.title(f"🚀 Unit: {data['name']}")
-        tracker = json.loads(json.loads(data['practice_data']).get('progress_tracker', '{}'))
+        tracker_json = json.loads(data['practice_data'])
+        tracker = json.loads(tracker_json.get('progress_tracker', '{}'))
         weak = determine_weak_topics(data)
         mastery = int((1 - (len(weak)/len(tracker) if tracker else 0)) * 100)
         
@@ -235,7 +233,7 @@ elif st.session_state.current_project:
         with t1: st.markdown(data['notes'])
         with t2:
             if st.button("🔄 Generate Analogies"):
-                ana = generate_content(f"Create 5 real-world analogies based STRICTLY on the content of these study notes: {data['notes'][:5000]}", client)
+                ana = generate_content(f"Create 5 real-world analogies based STRICTLY on: {data['notes'][:5000]}", client)
                 db.update_project_field(data['name'], 'analogy_data', 'current', ana)
                 st.rerun()
             st.markdown(json.loads(data['analogy_data']).get('current', 'No analogies yet.'))
@@ -246,85 +244,61 @@ elif st.session_state.current_project:
         
         col_gen, col_foc = st.columns(2)
         if col_gen.button("🎲 Generate General Quiz"):
-            prompt = f"""
-            Generate 10 MCQ/TF JSON questions based STRICTLY and ONLY on the following study notes. 
-            Do not include general knowledge.
-            NOTES: {data['notes'][:10000]}
-            FORMAT: {{'questions': [{{'id':1,'question_text':'...','options':['A','B','C','D'],'correct_answer':'A','primary_concept':'Topic','detailed_explanation':'Why this answer is correct...'}}]}}
-            """
+            prompt = f"Generate 10 technical MCQ questions based on: {data['notes'][:10000]}. FORMAT: {{'questions': [{{'id':1,'question_text':'','options':['A','B','C','D'],'correct_answer':'A','primary_concept':'','detailed_explanation':''}}]}}"
             st.session_state.quiz_data = generate_content(prompt, client, is_json=True)
             st.session_state.quiz_submitted = False; st.session_state.user_answers = {}; st.rerun()
             
         if weak and col_foc.button(f"🎯 Generate Focus Quiz ({len(weak)})"):
-            prompt = f"""
-            Generate 10 MCQ/TF JSON questions strictly focusing ONLY on: {', '.join(weak)}.
-            NOTES: {data['notes'][:5000]}
-            FORMAT: {{'questions': [...]}}
-            """
+            prompt = f"Generate 10 technical MCQs strictly and only on these topics: {', '.join(weak)}. Use this context: {data['notes'][:5000]}. You MUST provide 'question_text' and 'options' for every item. FORMAT: {{'questions': [...]}}"
             st.session_state.quiz_data = generate_content(prompt, client, is_json=True)
             st.session_state.quiz_submitted = False; st.session_state.user_answers = {}; st.rerun()
 
         if st.session_state.quiz_data:
             q_json = safe_json_parse(st.session_state.quiz_data)
-            
-            # --- FIX: Validation to prevent KeyError ---
             if q_json and "questions" in q_json:
                 if not st.session_state.quiz_submitted:
                     with st.form("quiz_form"):
                         ans_map = {}
                         for i, q in enumerate(q_json['questions']):
-                            # Using .get() to avoid KeyErrors if keys are missing
-                            q_text = q.get('question_text', 'Question text missing')
-                            q_concept = q.get('primary_concept', 'Concept')
-                            st.markdown(f"**Q{i+1}:** {q_text} *({q_concept})*")
-                            
-                            ans_map[q.get('id', i)] = st.radio("Choose:", q.get('options', []), index=None, key=f"q_{i}")
+                            q_text = q.get('question_text')
+                            q_opts = q.get('options')
+                            # Ensure we only display valid questions
+                            if q_text and q_opts:
+                                st.markdown(f"**Q{i+1}:** {q_text} *({q.get('primary_concept', 'Concept')})*")
+                                ans_map[i] = st.radio("Choose:", q_opts, index=None, key=f"q_{i}")
+                                st.divider()
                         
                         if st.form_submit_button("Submit Quiz"):
                             st.session_state.user_answers = ans_map
                             st.session_state.quiz_submitted = True
-                            scores = {q.get('primary_concept', 'Concept'): (1 if ans_map[q.get('id', i)] == q.get('correct_answer') else 0, 1) for i, q in enumerate(q_json['questions'])}
+                            scores = {q.get('primary_concept', 'Topic'): (1 if ans_map.get(i) == q.get('correct_answer') else 0, 1) for i, q in enumerate(q_json['questions'])}
                             db.update_progress_tracker(data['name'], scores)
                             st.rerun()
 
-                # --- FIX: Detailed Explanations for wrong answers ---
                 elif st.session_state.quiz_submitted:
                     st.header("🏁 Quiz Results")
                     score = 0
                     for i, q in enumerate(q_json['questions']):
-                        user_ans = st.session_state.user_answers.get(q.get('id', i))
+                        user_ans = st.session_state.user_answers.get(i)
                         correct_ans = q.get('correct_answer')
-                        explanation = q.get('detailed_explanation', 'No explanation available.')
                         is_correct = user_ans == correct_ans
                         if is_correct: score += 1
                         
                         with st.container():
                             if is_correct:
-                                st.markdown(f"""<div class="correct-box">
-                                    <b>Q{i+1}: Correct!</b><br>{q.get('question_text', '...')}<br>
-                                    <i>Your Answer: {user_ans}</i>
-                                </div>""", unsafe_allow_html=True)
+                                st.markdown(f"""<div class="correct-box"><b>Q{i+1}: Correct!</b><br>{q.get('question_text')}<br><i>Your Answer: {user_ans}</i></div>""", unsafe_allow_html=True)
                             else:
-                                st.markdown(f"""<div class="wrong-box">
-                                    <b>Q{i+1}: Incorrect</b><br>{q.get('question_text', '...')}<br>
-                                    <b>Correct Answer:</b> {correct_ans}<br>
-                                    <b>Explanation:</b> {explanation}
-                                </div>""", unsafe_allow_html=True)
-                    
-                    st.success(f"### Final Score: {score}/{len(q_json['questions'])}")
-                    if st.button("🔄 Take New Quiz"):
-                        st.session_state.quiz_data = None
-                        st.session_state.quiz_submitted = False
-                        st.rerun()
-            else:
-                st.error("Failed to parse quiz. Try generating a new one.")
+                                st.markdown(f"""<div class="wrong-box"><b>Q{i+1}: Incorrect</b><br>{q.get('question_text')}<br><b>Correct:</b> {correct_ans}<br><b>Note:</b> {q.get('detailed_explanation')}</div>""", unsafe_allow_html=True)
+                    st.success(f"### Score: {score}/{len(q_json['questions'])}")
+                    if st.button("🔄 New Quiz"): st.session_state.quiz_data = None; st.session_state.quiz_submitted = False; st.rerun()
 
     elif app_mode == "📊 Mastery Tracker":
         st.title("📊 Concept Mastery")
-        tracker = json.loads(json.loads(data['practice_data']).get('progress_tracker', '{}'))
+        tracker_json = json.loads(data['practice_data'])
+        tracker = json.loads(tracker_json.get('progress_tracker', '{}'))
         if tracker:
             rows = [{"Concept": c, "Accuracy": f"{(s['correct']/s['total'])*100:.1f}%", "Status": "🟢" if (s['correct']/s['total']) >= 0.8 else "🔴"} for c, s in tracker.items()]
             st.table(rows)
-            if st.button("🗑️ Clear Data"): db.reset_progress_tracker(data['name']); st.rerun()
+            if st.button("🗑️ Reset"): db.reset_progress_tracker(data['name']); st.rerun()
 
-else: st.warning("Configure API and select project.")
+else: st.warning("Please configure API and select project.")
