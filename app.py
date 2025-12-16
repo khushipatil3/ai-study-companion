@@ -182,9 +182,8 @@ def get_system_prompt(level):
     base = "Act as a Tutor. Output strictly Markdown."
     if level == "Intermediate": base = "Act as a Professor. Use detailed definitions."
     elif level == "Advanced": base = "Act as a Subject Matter Expert. Explain nuances."
-    return base + " Insert 
-
-[Image of X]
+    # Force single line string return
+    return f"{base} Insert
  tags for visual aids."
 
 def _attempt_quiz_generation(system_prompt, notes_truncated, client):
