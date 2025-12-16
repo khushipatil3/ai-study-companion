@@ -149,7 +149,7 @@ def generate_content(prompt, client, is_json=False):
                 {"role": "user", "content": prompt}
             ],
             response_format={"type": "json_object"} if is_json else None,
-            temperature=0.3 # Lower temperature for higher factual accuracy
+            temperature=0.3 
         )
         return resp.choices[0].message.content
     except Exception as e:
@@ -250,15 +250,15 @@ elif st.session_state.current_project:
             Generate 10 MCQ/TF JSON questions based STRICTLY and ONLY on the following study notes. 
             Do not include general knowledge.
             NOTES: {data['notes'][:10000]}
-            FORMAT: {{'questions': [{{'id':1,'question_text':'','options':['A','B','C','D'],'correct_answer':'A','primary_concept':'Topic Title','detailed_explanation':''}}]}}
+            FORMAT: {{'questions': [{{'id':1,'question_text':'...','options':['A','B','C','D'],'correct_answer':'A','primary_concept':'Topic','detailed_explanation':'Why this answer is correct...'}}]}}
             """
             st.session_state.quiz_data = generate_content(prompt, client, is_json=True)
             st.session_state.quiz_submitted = False; st.session_state.user_answers = {}; st.rerun()
             
         if weak and col_foc.button(f"🎯 Generate Focus Quiz ({len(weak)})"):
             prompt = f"""
-            Generate 10 MCQ/TF JSON questions strictly focusing ONLY on these specific topics: {', '.join(weak)}.
-            Use this context for question details: {data['notes'][:5000]}
+            Generate 10 MCQ/TF JSON questions strictly focusing ONLY on: {', '.join(weak)}.
+            NOTES: {data['notes'][:5000]}
             FORMAT: {{'questions': [...]}}
             """
             st.session_state.quiz_data = generate_content(prompt, client, is_json=True)
@@ -266,45 +266,58 @@ elif st.session_state.current_project:
 
         if st.session_state.quiz_data:
             q_json = safe_json_parse(st.session_state.quiz_data)
-            if q_json and not st.session_state.quiz_submitted:
-                with st.form("quiz_form"):
-                    ans_map = {}
-                    for i, q in enumerate(q_json['questions']):
-                        st.markdown(f"**Q{i+1}:** {q['question_text']}")
-                        ans_map[q['id']] = st.radio("Choose:", q['options'], index=None, key=f"q_{q['id']}")
-                    
-                    if st.form_submit_button("Submit Quiz"):
-                        st.session_state.user_answers = ans_map
-                        st.session_state.quiz_submitted = True
-                        scores = {q['primary_concept']: (1 if ans_map[q['id']] == q['correct_answer'] else 0, 1) for q in q_json['questions']}
-                        db.update_progress_tracker(data['name'], scores)
-                        st.rerun()
             
-            elif st.session_state.quiz_submitted:
-                st.header("🏁 Quiz Results")
-                score = 0
-                for i, q in enumerate(q_json['questions']):
-                    user_ans = st.session_state.user_answers.get(q['id'])
-                    is_correct = user_ans == q['correct_answer']
-                    if is_correct: score += 1
+            # --- FIX: Validation to prevent KeyError ---
+            if q_json and "questions" in q_json:
+                if not st.session_state.quiz_submitted:
+                    with st.form("quiz_form"):
+                        ans_map = {}
+                        for i, q in enumerate(q_json['questions']):
+                            # Using .get() to avoid KeyErrors if keys are missing
+                            q_text = q.get('question_text', 'Question text missing')
+                            q_concept = q.get('primary_concept', 'Concept')
+                            st.markdown(f"**Q{i+1}:** {q_text} *({q_concept})*")
+                            
+                            ans_map[q.get('id', i)] = st.radio("Choose:", q.get('options', []), index=None, key=f"q_{i}")
+                        
+                        if st.form_submit_button("Submit Quiz"):
+                            st.session_state.user_answers = ans_map
+                            st.session_state.quiz_submitted = True
+                            scores = {q.get('primary_concept', 'Concept'): (1 if ans_map[q.get('id', i)] == q.get('correct_answer') else 0, 1) for i, q in enumerate(q_json['questions'])}
+                            db.update_progress_tracker(data['name'], scores)
+                            st.rerun()
+
+                # --- FIX: Detailed Explanations for wrong answers ---
+                elif st.session_state.quiz_submitted:
+                    st.header("🏁 Quiz Results")
+                    score = 0
+                    for i, q in enumerate(q_json['questions']):
+                        user_ans = st.session_state.user_answers.get(q.get('id', i))
+                        correct_ans = q.get('correct_answer')
+                        explanation = q.get('detailed_explanation', 'No explanation available.')
+                        is_correct = user_ans == correct_ans
+                        if is_correct: score += 1
+                        
+                        with st.container():
+                            if is_correct:
+                                st.markdown(f"""<div class="correct-box">
+                                    <b>Q{i+1}: Correct!</b><br>{q.get('question_text', '...')}<br>
+                                    <i>Your Answer: {user_ans}</i>
+                                </div>""", unsafe_allow_html=True)
+                            else:
+                                st.markdown(f"""<div class="wrong-box">
+                                    <b>Q{i+1}: Incorrect</b><br>{q.get('question_text', '...')}<br>
+                                    <b>Correct Answer:</b> {correct_ans}<br>
+                                    <b>Explanation:</b> {explanation}
+                                </div>""", unsafe_allow_html=True)
                     
-                    with st.container():
-                        if is_correct:
-                            st.markdown(f"""<div class="correct-box">
-                                <b>Q{i+1}: Correct!</b><br>{q['question_text']}<br>
-                                <i>Your Answer: {user_ans}</i>
-                            </div>""", unsafe_allow_html=True)
-                        else:
-                            st.markdown(f"""<div class="wrong-box">
-                                <b>Q{i+1}: Incorrect</b><br>{q['question_text']}<br>
-                                <b>Correct Answer:</b> {q['correct_answer']}<br>
-                                <b>Explanation:</b> {q['detailed_explanation']}
-                            </div>""", unsafe_allow_html=True)
-                st.success(f"### Final Score: {score}/{len(q_json['questions'])}")
-                if st.button("🔄 Take New Quiz"):
-                    st.session_state.quiz_data = None
-                    st.session_state.quiz_submitted = False
-                    st.rerun()
+                    st.success(f"### Final Score: {score}/{len(q_json['questions'])}")
+                    if st.button("🔄 Take New Quiz"):
+                        st.session_state.quiz_data = None
+                        st.session_state.quiz_submitted = False
+                        st.rerun()
+            else:
+                st.error("Failed to parse quiz. Try generating a new one.")
 
     elif app_mode == "📊 Mastery Tracker":
         st.title("📊 Concept Mastery")
@@ -314,4 +327,4 @@ elif st.session_state.current_project:
             st.table(rows)
             if st.button("🗑️ Clear Data"): db.reset_progress_tracker(data['name']); st.rerun()
 
-else: st.warning("Please configure your Groq API Key and select or create a project to begin.")
+else: st.warning("Configure API and select project.")
