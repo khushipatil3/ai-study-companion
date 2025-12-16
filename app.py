@@ -3,7 +3,7 @@ import fitz # PyMuPDF for PDF processing
 from groq import Groq
 import sqlite3
 import json
-import base64 
+import base64
 
 # --- CONFIGURATION ---
 GROQ_MODEL = "llama-3.1-8b-instant" 
