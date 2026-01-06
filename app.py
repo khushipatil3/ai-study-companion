@@ -757,6 +757,53 @@ def extract_content_text_only(uploaded_file):
     progress_container.empty()
     bar.empty()
     return full_content
+def extract_pdf_pages_as_images(uploaded_file):
+    uploaded_file.seek(0)
+    doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
+    images_base64 = []
+
+    for page in doc:
+        pix = page.get_pixmap(dpi=200)
+        img_bytes = pix.tobytes("png")
+        images_base64.append(base64.b64encode(img_bytes).decode("utf-8"))
+
+    return images_base64
+
+
+def analyze_scanned_exam_papers(images_base64, client):
+    system_prompt = """
+    You are an expert exam analyst.
+
+    TASK:
+    - Read exam paper images
+    - Extract questions & marks
+    - DO NOT answer questions
+    - Identify patterns & trends
+
+    OUTPUT (Markdown):
+    - Top 5 Important Topics
+    - Repeated Question Themes
+    - Exam Strategy
+    """
+
+    messages = [{"role": "system", "content": system_prompt}]
+
+    for img in images_base64[:10]:
+        messages.append({
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "Analyze this exam paper page"},
+                {"type": "input_image", "image_base64": img}
+            ]
+        })
+
+    completion = client.chat.completions.create(
+        model=GROQ_VISION_MODEL,
+        messages=messages,
+        temperature=0.4
+    )
+
+    return completion.choices[0].message.content
 
 
 # --- SIDEBAR (NAVIGATION) ---
@@ -931,91 +978,60 @@ else:
 
         # --- TAB: EXAM ANALYSIS (FINAL REVISION) ---
         with tab_exam:
-            st.header("📈 Past Paper & Question Bank Analysis")
-            # Set this section to be empty until analysis is run, as requested previously
-            st.markdown("""
-                Upload a past paper or question bank PDF below.
-                The AI will analyze the **extracted text** from the PDF to identify key trends and repeated questions.
-            """)
+    st.header("📈 Past Paper & Question Bank Analysis")
+
+    uploaded_pdf = st.file_uploader(
+        "Upload Past Paper PDF",
+        type="pdf",
+        key="exam_pdf_uploader"
+    )
+
+    if uploaded_pdf:
+        with st.spinner("Extracting content from PDF..."):
+            pdf_text = extract_content_text_only(uploaded_pdf)
+
+        is_scanned_pdf = len(pdf_text.strip()) < 100
+
+        if is_scanned_pdf:
+            st.warning("📷 Scanned PDF detected. Using AI Vision analysis.")
+
+            if st.button("🎯 Run Vision-Based Exam Analysis", type="primary"):
+                images_base64 = extract_pdf_pages_as_images(uploaded_pdf)
+                analysis_result = analyze_scanned_exam_papers(images_base64, client)
+
+                db.update_exam_analysis_data(
+                    project_data['name'],
+                    "vision_exam_analysis",
+                    analysis_result
+                )
+
+                st.session_state.exam_analysis_text = analysis_result
+                st.rerun()
+
+        else:
+            st.success("📄 Searchable PDF detected.")
+
+            if st.button("🎯 Run Text-Based Exam Analysis", type="primary"):
+                analysis_result = analyze_past_papers(pdf_text, client)
+
+                db.update_exam_analysis_data(
+                    project_data['name'],
+                    "text_exam_analysis",
+                    analysis_result
+                )
+
+                st.session_state.exam_analysis_text = analysis_result
+                st.rerun()
+
+    st.divider()
+
+    if st.session_state.get("exam_analysis_text"):
+        st.subheader("AI Exam Analysis Report")
+        st.markdown(st.session_state.exam_analysis_text)
+    else:
+        st.info("Upload a past paper PDF to begin analysis.")
+
             
-            uploaded_pdf = st.file_uploader("Upload Past Paper PDF", type="pdf", key="exam_pdf_uploader")
-            
-            # Logic to handle PDF upload and extraction
-            if uploaded_pdf:
-                if not uploaded_pdf.file_id == st.session_state.get('last_uploaded_exam_pdf_id'):
-                    with st.spinner("Extracting content from PDF..."):
-    pdf_text = extract_content_text_only(uploaded_pdf)
-
-# --- SMART DETECTION ---
-is_scanned_pdf = len(pdf_text.strip()) < 100
-
-if is_scanned_pdf:
-    st.warning("📷 Scanned PDF detected. Switching to AI Vision analysis.")
-
-    images_base64 = extract_pdf_pages_as_images(uploaded_pdf)
-
-    if st.button("🎯 Run Vision-Based Exam Analysis", type="primary"):
-        analysis_result = analyze_scanned_exam_papers(images_base64, client)
-
-        db.update_exam_analysis_data(
-            project_data['name'],
-            "vision_exam_analysis",
-            analysis_result
-        )
-
-        st.session_state.exam_analysis_text = analysis_result
-        st.rerun()
-
-else:
-    st.success("📄 Searchable PDF detected.")
-
-    if st.button("🎯 Run Exam Analysis", type="primary"):
-        analysis_result = analyze_past_papers(pdf_text, client)
-
-        db.update_exam_analysis_data(
-            project_data['name'],
-            "text_exam_analysis",
-            analysis_result
-        )
-
-        st.session_state.exam_analysis_text = analysis_result
-        st.rerun()
-
-
-                # 3. Analysis Button
-                if st.button("🎯 Run Exam Analysis", type="primary"):
-                    question_content = st.session_state.exam_analysis_pdf_content
-                    
-                    if len(question_content.strip()) < 100:
-                        st.error("The extracted text from the PDF is too short for meaningful analysis. Please check your file.")
-                    else:
-                        analysis_result = analyze_past_papers(
-                            paper_content=question_content, 
-                            client=client
-                        )
-                        
-                        current_hash = hash(question_content)
-                        analysis_key = f"analysis_{current_hash}"
-                        db.update_exam_analysis_data(project_data['name'], analysis_key, analysis_result)
-                        
-                        st.session_state.exam_analysis_text = analysis_result
-                        st.rerun() 
-            else:
-                st.session_state.exam_analysis_pdf_content = ""
-                st.session_state.last_uploaded_exam_pdf_id = None
-            
-            st.divider()
-            
-            # Display stored or generated analysis
-            analysis_to_display = st.session_state.get('exam_analysis_text')
-            
-            if analysis_to_display:
-                st.subheader("AI Exam Analysis Report")
-                st.markdown(analysis_to_display)
-            else:
-                st.info("Upload a past paper PDF and click 'Run Exam Analysis' to generate a report.")
-
-
         # --- TAB 2: PRACTICES ---
         with tab2:
             st.header("Practice Tools")
