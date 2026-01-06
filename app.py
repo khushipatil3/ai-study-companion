@@ -977,59 +977,61 @@ else:
                  st.markdown(analogy_data[topic_request])
 
         # --- TAB: EXAM ANALYSIS (FINAL REVISION) ---
+                # --- TAB: EXAM ANALYSIS (FIXED & CLEAN) ---
         with tab_exam:
-    st.header("📈 Past Paper & Question Bank Analysis")
+            st.header("📈 Past Paper & Question Bank Analysis")
 
-    uploaded_pdf = st.file_uploader(
-        "Upload Past Paper PDF",
-        type="pdf",
-        key="exam_pdf_uploader"
-    )
+            uploaded_pdf = st.file_uploader(
+                "Upload Past Paper PDF",
+                type="pdf",
+                key="exam_pdf_uploader"
+            )
 
-    if uploaded_pdf:
-        with st.spinner("Extracting content from PDF..."):
-            pdf_text = extract_content_text_only(uploaded_pdf)
+            if uploaded_pdf:
+                with st.spinner("Extracting content from PDF..."):
+                    pdf_text = extract_content_text_only(uploaded_pdf)
 
-        is_scanned_pdf = len(pdf_text.strip()) < 100
+                is_scanned_pdf = len(pdf_text.strip()) < 100
 
-        if is_scanned_pdf:
-            st.warning("📷 Scanned PDF detected. Using AI Vision analysis.")
+                if is_scanned_pdf:
+                    st.warning("📷 Scanned PDF detected. Using AI Vision analysis.")
 
-            if st.button("🎯 Run Vision-Based Exam Analysis", type="primary"):
-                images_base64 = extract_pdf_pages_as_images(uploaded_pdf)
-                analysis_result = analyze_scanned_exam_papers(images_base64, client)
+                    if st.button("🎯 Run Vision-Based Exam Analysis", type="primary"):
+                        images_base64 = extract_pdf_pages_as_images(uploaded_pdf)
+                        analysis_result = analyze_scanned_exam_papers(images_base64, client)
 
-                db.update_exam_analysis_data(
-                    project_data['name'],
-                    "vision_exam_analysis",
-                    analysis_result
-                )
+                        db.update_exam_analysis_data(
+                            project_data['name'],
+                            "vision_exam_analysis",
+                            analysis_result
+                        )
 
-                st.session_state.exam_analysis_text = analysis_result
-                st.rerun()
+                        st.session_state.exam_analysis_text = analysis_result
+                        st.rerun()
 
-        else:
-            st.success("📄 Searchable PDF detected.")
+                else:
+                    st.success("📄 Searchable PDF detected.")
 
-            if st.button("🎯 Run Text-Based Exam Analysis", type="primary"):
-                analysis_result = analyze_past_papers(pdf_text, client)
+                    if st.button("🎯 Run Text-Based Exam Analysis", type="primary"):
+                        analysis_result = analyze_past_papers(pdf_text, client)
 
-                db.update_exam_analysis_data(
-                    project_data['name'],
-                    "text_exam_analysis",
-                    analysis_result
-                )
+                        db.update_exam_analysis_data(
+                            project_data['name'],
+                            "text_exam_analysis",
+                            analysis_result
+                        )
 
-                st.session_state.exam_analysis_text = analysis_result
-                st.rerun()
+                        st.session_state.exam_analysis_text = analysis_result
+                        st.rerun()
 
-    st.divider()
+            st.divider()
 
-    if st.session_state.get("exam_analysis_text"):
-        st.subheader("AI Exam Analysis Report")
-        st.markdown(st.session_state.exam_analysis_text)
-    else:
-        st.info("Upload a past paper PDF to begin analysis.")
+            if st.session_state.get("exam_analysis_text"):
+                st.subheader("AI Exam Analysis Report")
+                st.markdown(st.session_state.exam_analysis_text)
+            else:
+                st.info("Upload a past paper PDF to begin analysis.")
+
 
             
         # --- TAB 2: PRACTICES ---
