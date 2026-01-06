@@ -1,18 +1,19 @@
 import streamlit as st
-import fitz  # PyMuPDF for PDF processing
+import fitz # PyMuPDF for PDF processing
 from groq import Groq
 import sqlite3
 import json
 import base64
 
-# --- MODEL CONSTANTS ---
-# Using the latest stable models
+# --- MODEL CONSTANT ---
+# Current stable Groq model for fast, high-quality responses.
 GROQ_MODEL = "llama-3.3-70b-versatile"
+# Vision Model for Scanned Exams (Updated to working 90b model)
 GROQ_VISION_MODEL = "llama-3.2-90b-vision-preview"
 
 # --- CONFIGURABLE THRESHOLDS ---
-WEAK_TOPIC_ACCURACY_THRESHOLD = 0.80 
-WEAK_TOPIC_MIN_ATTEMPTS = 3          
+WEAK_TOPIC_ACCURACY_THRESHOLD = 0.80 # Below 80% is weak
+WEAK_TOPIC_MIN_ATTEMPTS = 3          # Used for 'Low Data' message
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="AI Study Companion", page_icon="🎓", layout="wide")
@@ -20,15 +21,41 @@ st.set_page_config(page_title="AI Study Companion", page_icon="🎓", layout="wi
 # --- CSS STYLING ---
 st.markdown("""
 <style>
-    .main { background-color: #f0f2f6; color: #1c1e21; }
-    .css-1d3f8rz { background-color: #ffffff; }
+    /* Customizing the main background and text for a softer look */
+    .main {
+        background-color: #f0f2f6; /* Light gray background */
+        color: #1c1e21; /* Dark text */
+    }
+    /* Customizing sidebar background */
+    .css-1d3f8rz {
+        background-color: #ffffff; /* White sidebar */
+    }
+    /* Hide default streamlit elements */
     #MainMenu {visibility: hidden;}
+    .stDeployButton {display:none;}
     footer {visibility: hidden;}
-    .correct { color: green; font-weight: bold; }
-    .incorrect { color: red; font-weight: bold; }
-    .feedback-box { padding: 10px; margin: 5px 0; border-radius: 5px; }
-    .correct-feedback { background-color: #e6ffe6; border-left: 5px solid green; }
-    .incorrect-feedback { background-color: #ffe6e6; border-left: 5px solid red; }
+    /* Highlight the Correct/Incorrect feedback */
+    .correct {
+        color: green;
+        font-weight: bold;
+    }
+    .incorrect {
+        color: red;
+        font-weight: bold;
+    }
+    .feedback-box {
+        padding: 10px;
+        margin: 5px 0;
+        border-radius: 5px;
+    }
+    .correct-feedback {
+        background-color: #e6ffe6; /* Light green */
+        border-left: 5px solid green;
+    }
+    .incorrect-feedback {
+        background-color: #ffe6e6; /* Light red */
+        border-left: 5px solid red;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -42,8 +69,14 @@ class StudyDB:
         return sqlite3.connect(self.db_name)
 
     def init_db(self):
+        """
+        Creates the database table if it doesn't exist and handles schema migration
+        for 'practice_data', 'analogy_data', and 'exam_analysis'.
+        """
         conn = self.connect()
         c = conn.cursor()
+        
+        # 1. CREATE TABLE IF NOT EXISTS
         c.execute('''
             CREATE TABLE IF NOT EXISTS projects (
                 name TEXT PRIMARY KEY,
@@ -56,17 +89,23 @@ class StudyDB:
                 exam_analysis TEXT
             )
         ''')
-        # Schema migration to ensure all columns exist
-        for col in ['practice_data', 'analogy_data', 'exam_analysis']:
+
+        # 2. SCHEMA MIGRATION: Check and add columns
+        for col_name in ['practice_data', 'analogy_data', 'exam_analysis']:
             try:
-                c.execute(f"SELECT {col} FROM projects LIMIT 1")
-            except sqlite3.OperationalError:
-                try: c.execute(f"ALTER TABLE projects ADD COLUMN {col} TEXT DEFAULT '{{}}'")
-                except: pass
+                c.execute(f"SELECT {col_name} FROM projects LIMIT 1")
+            except sqlite3.OperationalError as e:
+                if "no such column" in str(e):
+                    # st.warning(f"Database migration: Adding '{col_name}' column.")
+                    c.execute(f"ALTER TABLE projects ADD COLUMN {col_name} TEXT DEFAULT '{{}}'")
+                else:
+                    raise e 
+        
         conn.commit()
         conn.close()
 
     def save_project(self, name, level, notes, raw_text, practice_data="{}", analogy_data="{}", exam_analysis="{}"):
+        """Saves a new project or updates an existing one."""
         conn = self.connect()
         c = conn.cursor()
         c.execute('''
@@ -76,109 +115,198 @@ class StudyDB:
         conn.commit()
         conn.close()
 
-    def update_json_field(self, name, field, key, content):
-        proj = self.get_project_details(name)
-        if not proj: return
-        data = json.loads(proj.get(field) or "{}")
-        data[key] = content
+    def update_project_json_field(self, name, field_name, key, content):
+        """Updates a specific key within a JSON field (e.g., practice_data, analogy_data, or exam_analysis)."""
+        project_data = self.get_project_details(name)
+        if not project_data or field_name not in project_data:
+            return
+
+        # Safely load existing data, defaulting to an empty dict
+        data_dict = json.loads(project_data.get(field_name) or "{}")
+        data_dict[key] = content
+        
         conn = self.connect()
         c = conn.cursor()
-        c.execute(f'UPDATE projects SET {field} = ? WHERE name = ?', (json.dumps(data), name))
+        c.execute(f'''
+            UPDATE projects SET {field_name} = ? WHERE name = ?
+        ''', (json.dumps(data_dict), name))
         conn.commit()
         conn.close()
         
-    def update_practice_data(self, name, key, content): return self.update_json_field(name, 'practice_data', key, content)
-    def update_analogy_data(self, name, key, content): return self.update_json_field(name, 'analogy_data', key, content)
-    def update_exam_analysis_data(self, name, key, content): return self.update_json_field(name, 'exam_analysis', key, content)
+    def update_practice_data(self, name, key, content):
+        return self.update_project_json_field(name, 'practice_data', key, content)
+        
+    def update_analogy_data(self, name, key, content):
+        return self.update_project_json_field(name, 'analogy_data', key, content)
+        
+    def update_exam_analysis_data(self, name, key, content):
+        return self.update_project_json_field(name, 'exam_analysis', key, content)
+
 
     def load_all_projects(self):
+        """Fetches a list of all project names."""
         conn = self.connect()
         c = conn.cursor()
         c.execute("SELECT name FROM projects")
-        return [row[0] for row in c.fetchall()]
+        projects = [row[0] for row in c.fetchall()]
+        conn.close()
+        return projects
 
     def get_project_details(self, name):
+        """Fetches the full details of a specific project."""
         conn = self.connect()
         c = conn.cursor()
-        c.execute("SELECT * FROM projects WHERE name=?", (name,))
+        # Ensure we select all columns, including 'exam_analysis'
+        c.execute("SELECT name, level, notes, raw_text, progress, practice_data, analogy_data, exam_analysis FROM projects WHERE name=?", (name,))
         row = c.fetchone()
         conn.close()
         if row:
             return {
-                "name": row[0], "level": row[1], "notes": row[2], "raw_text": row[3],
-                "progress": row[4], "practice_data": row[5], "analogy_data": row[6], "exam_analysis": row[7]
+                "name": row[0],
+                "level": row[1],
+                "notes": row[2],
+                "raw_text": row[3],
+                "progress": row[4],
+                "practice_data": row[5],
+                "analogy_data": row[6],
+                "exam_analysis": row[7]
             }
         return None
         
     def update_progress_tracker(self, project_name, concept_scores):
-        proj = self.get_project_details(project_name)
-        if not proj: return
-        p_data = json.loads(proj.get('practice_data') or "{}")
-        tracker = json.loads(p_data.get('progress_tracker') or "{}")
+        """
+        Updates the progress tracker JSON field within practice_data.
+        concept_scores is a dict: {topic: (correct_count, total_count)}
+        """
+        project_data = self.get_project_details(project_name)
+        if not project_data:
+            return
+
+        practice_dict = json.loads(project_data.get('practice_data') or "{}")
+        
+        # Load or initialize the tracker
+        tracker = json.loads(practice_dict.get('progress_tracker') or "{}")
 
         for concept, (correct, total) in concept_scores.items():
-            if concept not in tracker: tracker[concept] = {"correct": 0, "total": 0}
+            if concept not in tracker:
+                tracker[concept] = {"correct": 0, "total": 0}
+            
             tracker[concept]["correct"] += correct
             tracker[concept]["total"] += total
         
-        p_data['progress_tracker'] = json.dumps(tracker)
+        # Save updated tracker back into practice_data
+        practice_dict['progress_tracker'] = json.dumps(tracker)
+
         conn = self.connect()
         c = conn.cursor()
-        c.execute('UPDATE projects SET practice_data = ? WHERE name = ?', (json.dumps(p_data), project_name))
+        c.execute('''
+            UPDATE projects SET practice_data = ? WHERE name = ?
+        ''', (json.dumps(practice_dict), project_name))
         conn.commit()
         conn.close()
 
     def reset_progress_tracker(self, project_name):
-        proj = self.get_project_details(project_name)
-        if not proj: return
-        p_data = json.loads(proj.get('practice_data') or "{}")
-        p_data['progress_tracker'] = json.dumps({}) 
+        """Clears the progress_tracker field for a given project."""
+        project_data = self.get_project_details(project_name)
+        if not project_data:
+            return
+            
+        practice_dict = json.loads(project_data.get('practice_data') or "{}")
+        practice_dict['progress_tracker'] = json.dumps({}) # Set tracker to empty JSON
+        
         conn = self.connect()
         c = conn.cursor()
-        c.execute('UPDATE projects SET practice_data = ? WHERE name = ?', (json.dumps(p_data), project_name))
+        c.execute('''
+            UPDATE projects SET practice_data = ? WHERE name = ?
+        ''', (json.dumps(practice_dict), project_name))
         conn.commit()
         conn.close()
+        
 
-db = StudyDB()
+db = StudyDB() # Initialize DB
 
 # --- SESSION STATE ---
-if 'current_project' not in st.session_state: st.session_state.current_project = None
-if 'theory_marks' not in st.session_state: st.session_state.theory_marks = 5
-if 'groq_api_key' not in st.session_state: st.session_state.groq_api_key = None 
-if 'quiz_data' not in st.session_state: st.session_state.quiz_data = None
-if 'quiz_submitted' not in st.session_state: st.session_state.quiz_submitted = False
-if 'user_answers' not in st.session_state: st.session_state.user_answers = {}
-if 'quiz_type' not in st.session_state: st.session_state.quiz_type = 'general'
-if 'exam_analysis_text' not in st.session_state: st.session_state.exam_analysis_text = None
-if 'exam_analysis_content_cache' not in st.session_state: st.session_state.exam_analysis_content_cache = None
-if 'last_uploaded_exam_id' not in st.session_state: st.session_state.last_uploaded_exam_id = None
-if 'weak_topics' not in st.session_state: st.session_state.weak_topics = []
-if 'focus_quiz_active' not in st.session_state: st.session_state.focus_quiz_active = False
-if 'qna_display_key' not in st.session_state: st.session_state.qna_display_key = None
-if 'qna_content' not in st.session_state: st.session_state.qna_content = None
+if 'current_project' not in st.session_state:
+    st.session_state.current_project = None
+if 'theory_marks' not in st.session_state:
+    st.session_state.theory_marks = 5
+if 'groq_api_key' not in st.session_state: 
+    st.session_state.groq_api_key = None 
+# State for interactive quiz
+if 'quiz_data' not in st.session_state:
+    st.session_state.quiz_data = None
+if 'quiz_submitted' not in st.session_state:
+    st.session_state.quiz_submitted = False
+if 'user_answers' not in st.session_state:
+    st.session_state.user_answers = {}
+if 'quiz_type' not in st.session_state:
+    st.session_state.quiz_type = 'general'
+if 'exam_analysis_text' not in st.session_state:
+    st.session_state.exam_analysis_text = None
+if 'exam_analysis_content_cache' not in st.session_state: 
+    st.session_state.exam_analysis_content_cache = None
+if 'last_uploaded_exam_id' not in st.session_state:
+    st.session_state.last_uploaded_exam_id = None
+if 'weak_topics' not in st.session_state: 
+    st.session_state.weak_topics = []
+if 'focus_quiz_active' not in st.session_state: 
+    st.session_state.focus_quiz_active = False
 
-# --- HELPER FUNCTIONS ---
+
+# --- HELPER FUNCTION FOR ROBUST JSON PARSING ---
 def safe_json_parse(json_str):
-    if not json_str: return None
+    """Safely extracts and parses JSON content from a string, handling LLM noise."""
+    if not json_str:
+        return None
+    
+    # Attempt to find the clean JSON block (removes '```json' and leading/trailing noise)
     try:
-        start = json_str.find('{')
-        end = json_str.rfind('}')
-        if start == -1 or end == -1: return json.loads(json_str.strip())
-        clean = json_str[start:end+1]
-        if clean.startswith('```json'): clean = clean[7:].strip()
-        if clean.endswith('```'): clean = clean[:-3].strip()
-        return json.loads(clean)
-    except: return None
+        start_index = json_str.find('{')
+        end_index = json_str.rfind('}')
+        
+        if start_index == -1 or end_index == -1:
+            # If no curly braces found, try to parse the whole thing anyway
+            return json.loads(json_str.strip())
 
+        clean_json_str = json_str[start_index:end_index + 1]
+        # Remove markdown code fence markers if they exist
+        if clean_json_str.startswith('```json'):
+            clean_json_str = clean_json_str[len('```json'):].strip()
+        if clean_json_str.endswith('```'):
+            clean_json_str = clean_json_str[:-len('```')].strip()
+
+        # Final check for valid JSON (empty check is inside the try block)
+        if not clean_json_str:
+            return None
+            
+        return json.loads(clean_json_str)
+    
+    except json.JSONDecodeError as e:
+        # print(f"JSON Decode Error: {e}")
+        return None
+    except Exception as e:
+        # print(f"Unexpected JSON cleaning error: {e}")
+        return None
+
+# --- NEW UTILITY FOR VISION/TEXT ---
 def pdf_page_to_base64(page):
+    """Converts a PyMuPDF page to a base64 encoded PNG image."""
     pix = page.get_pixmap()
     return base64.b64encode(pix.tobytes("png")).decode('utf-8')
 
 def extract_content_smart(uploaded_file):
+    """
+    Intelligently extracts content. 
+    Returns: (text_content, images_list_b64)
+    If text is sufficient, images_list_b64 is None.
+    If text is sparse (scan), text_content is None and images_list_b64 is populated.
+    """
     uploaded_file.seek(0)
     doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
     full_text = ""
     total_len = 0
+    
+    # Heuristic: Check density of first few pages
     check_limit = min(3, len(doc))
     for i in range(check_limit):
         total_len += len(doc[i].get_text())
@@ -187,205 +315,654 @@ def extract_content_smart(uploaded_file):
     
     if is_scanned:
         images = []
-        for i in range(min(len(doc), 5)):
+        page_limit = min(len(doc), 5) 
+        for i in range(page_limit):
             images.append(pdf_page_to_base64(doc[i]))
         return "", images
     else:
-        for page in doc: full_text += page.get_text() + "\n"
+        for page in doc:
+            full_text += page.get_text() + "\n--- PAGE_BREAK ---\n"
         return full_text, None
 
-# --- LLM FUNCTIONS ---
+# --- LLM Functions ---
+
 def get_system_prompt(level):
-    if level == "Basic": return "Act as a Tutor. GOAL: Pass the exam. Focus on definitions."
-    elif level == "Intermediate": return "Act as a Professor. GOAL: Solid understanding."
-    else: return "Act as a Subject Matter Expert. GOAL: Mastery."
+    if level == "Basic":
+        return """Act as a Tutor. GOAL: Pass the exam. Focus on definitions, brevity, and outlines. Output strictly Markdown. If you see text describing a diagram, use an 
 
-def generate_study_notes(text, level, client):
-    prompt = f"{get_system_prompt(level)}\nCONTENT: {text[:25000]}\nOutput strictly Markdown."
-    try:
-        return client.chat.completions.create(model=GROQ_MODEL, messages=[{"role": "user", "content": prompt}]).choices[0].message.content
-    except Exception as e: return f"Error: {e}"
+[Image of X]
+ tag where X is a detailed description of the diagram."""
+    elif level == "Intermediate":
+        return """Act as a Professor. GOAL: Solid understanding. Use detailed definitions, process steps, and exam tips. Output strictly Markdown. Insert 
 
-def generate_analogies(notes, client):
-    sys = "Identify 5 key concepts. Provide real-life analogies. Format: '**[Concept]**' followed by 'Analogy: [Analogy]'."
-    try:
-        return client.chat.completions.create(model=GROQ_MODEL, messages=[{"role": "system", "content": sys}, {"role": "user", "content": notes[:10000]}]).choices[0].message.content
-    except: return "Error."
+[Image of X]
+ tags frequently where X is a detailed description of a relevant diagram or concept."""
+    else: # Advanced
+        return """Act as a Subject Matter Expert. GOAL: Mastery. Explain nuances, real-world context, and deep connections. Output strictly Markdown. Insert  tags for every concept that would be better understood with a visual aid, using a detailed description for X."""
 
-def generate_specific_analogy(topic, client):
+def _attempt_quiz_generation(system_prompt, notes_truncated, client):
+    """Internal helper to call the Groq API with given prompt and notes."""
     try:
-        return client.chat.completions.create(model=GROQ_MODEL, messages=[{"role": "user", "content": f"Give a detailed analogy for: {topic}"}]).choices[0].message.content
-    except: return "Error."
+        completion = client.chat.completions.create(
+            model=GROQ_MODEL, 
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Generate 10 questions in strict JSON format based on these notes: {notes_truncated}"}
+            ],
+            response_format={"type": "json_object"}, # Enforce JSON output
+            temperature=0.8 # Use 0.8 for a good mix of question types
+        )
+        return completion.choices[0].message.content
+    except Exception as e:
+        # Check for API key error and report it clearly
+        if 'invalid_api_key' in str(e):
+             st.error("❌ API Key Error: Your Groq API key is invalid or expired. Please check your settings in the sidebar.")
+        # Specific Groq error handling (e.g., context window exceeded, though unlikely at 15k)
+        if 'context_length' in str(e):
+             st.error("❌ Context Length Error: The notes provided are too long for the model, even after truncation. Please simplify your notes.")
+        return None
 
-def generate_qna(notes, q_type, marks, client):
-    prompt = f"Generate {q_type} questions based on these notes."
-    if q_type == "custom": prompt += f" Each worth {marks} marks."
-    try:
-        return client.chat.completions.create(model=GROQ_MODEL, messages=[{"role": "user", "content": f"{prompt} Content: {notes[:15000]}"}]).choices[0].message.content
-    except: return "Error."
 
 def generate_interactive_drills(notes, client):
-    prompt = """Generate a JSON quiz with 10 questions (5 MCQ, 5 T/F).
-    JSON Format: {"quiz_title": "Drill", "questions": [{"id": 1, "type": "MCQ", "question_text": "...", "options": ["A: ..","B: .."], "correct_answer": "A", "primary_concept": "Concept", "detailed_explanation": "..."}]}"""
-    try:
-        return client.chat.completions.create(model=GROQ_MODEL, messages=[{"role": "system", "content": prompt}, {"role": "user", "content": notes[:15000]}], response_format={"type": "json_object"}).choices[0].message.content
-    except: return None
-
-def generate_focused_drills(notes, topics, client):
-    t_str = ", ".join(topics)
-    prompt = f"""Generate JSON quiz for topics: {t_str}.
-    JSON Format: {"quiz_title": "Focus Drill", "questions": [{"id": 1, "type": "MCQ", "question_text": "...", "options": ["A: ..","B: .."], "correct_answer": "A", "primary_concept": "Concept", "detailed_explanation": "..."}]}"""
-    try:
-        return client.chat.completions.create(model=GROQ_MODEL, messages=[{"role": "system", "content": prompt}, {"role": "user", "content": notes[:15000]}], response_format={"type": "json_object"}).choices[0].message.content
-    except: return None
-
-def analyze_exam_paper(txt, imgs, client):
-    prompt = "Analyze this exam paper. List: 1. High-Priority Topics. 2. Question Patterns. 3. Strategic Advice."
-    if imgs:
-        payload = [{"type": "text", "text": "Analyze this scanned exam paper."}]
-        for img in imgs: payload.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img}"}})
-        try:
-            return client.chat.completions.create(model=GROQ_VISION_MODEL, messages=[{"role": "user", "content": payload}], max_tokens=2000).choices[0].message.content
-        except Exception as e: return f"Vision Error: {e}"
-    else:
-        try:
-            return client.chat.completions.create(model=GROQ_MODEL, messages=[{"role": "user", "content": f"{prompt} Content: {txt[:20000]}"}]).choices[0].message.content
-        except Exception as e: return f"Text Error: {e}"
-
-# --- UI LOGIC ---
-def process_and_update_progress(project_name, questions, user_answers):
-    scores = {} 
-    valid_questions = [q for q in questions if 'id' in q]
-    for q in valid_questions:
-        concept = q.get('primary_concept', 'General') 
-        user_ans = user_answers.get(q['id'])
-        correct = False
-        if user_ans:
-            if q['type'] == 'MCQ': correct = (user_ans == q['correct_answer'])
-            else: correct = (str(user_ans).strip() == str(q['correct_answer']).strip())
-        
-        if concept not in scores: scores[concept] = [0, 0]
-        scores[concept][1] += 1 
-        if correct: scores[concept][0] += 1 
+    """Generates general interactive practice drills (MCQ, T/F) in a strict JSON format."""
     
-    db_scores = {k: tuple(v) for k, v in scores.items()}
+    system_prompt = """You are a quiz master for technical subjects. Based on the notes provided, generate a quiz with 10 questions total.
+    Crucially, for a **GENERAL QUIZ**, ensure the 10 questions cover the **widest possible range of high-level course topics** present in the notes.
+    The quiz must consist of: 5 Multiple Choice Questions (MCQs), each with 4 options (A, B, C, D). 5 True or False Questions (T/F).
+
+    For every question, you MUST provide a 'primary_concept' and a 'detailed_explanation'.
+    - The 'primary_concept' MUST be a **single, short, high-level canonical term** from the notes (e.g., 'A* Search', 'Supervised Learning', 'Logistic Regression'). **DO NOT USE SENTENCES OR LONG DESCRIPTIONS.** This is crucial for clean score tracking.
+    - The 'detailed_explanation' is the brief feedback (1-2 sentence) for the user.
+
+    The entire output MUST be a single JSON object. No other text, markdown, or commentary is allowed outside the JSON structure.
+
+    JSON Format MUST be:
+    {
+      "quiz_title": "Interactive Practice Drill (General)",
+      "questions": [
+        {
+          "id": 1,
+          "type": "MCQ",
+          "question_text": "...",
+          "options": ["A: ...", "B: ...", "C: ...", "D: ..."],
+          "correct_answer": "B", 
+          "primary_concept": "Search Algorithms", 
+          "detailed_explanation": "A* search is an informed search algorithm..."
+        },
+        {...}
+      ]
+    }
+    """
+    notes_truncated = notes[:15000]
+
+    with st.spinner("Generating general practice drills..."):
+        return _attempt_quiz_generation(system_prompt, notes_truncated, client)
+
+def generate_focused_drills(notes, weak_topics, client):
+    """
+    Generates adaptive drills focusing only on weak topics.
+    HARDENED PROMPT to prevent silent generation failure.
+    """
+    
+    topics_list_str = ", ".join(weak_topics)
+    
+    # -------------------------------------------------------------------------
+    # --- HARDENED SYSTEM PROMPT FOR FOCUS QUIZ ---
+    system_prompt = f"""You are an ADAPTIVE quiz master for technical subjects. Based on the notes, generate a quiz with 10 questions total.
+    
+    ***STRICT INSTRUCTION:*** The 10 questions MUST ONLY test the following concepts. You must use these terms verbatim:
+    WEAK TOPICS: {topics_list_str}
+    
+    The quiz must consist of a mix of Multiple Choice Questions (MCQs) and True or False Questions (T/F). Be concise in your questions and explanations.
+
+    For every question, you MUST provide a 'primary_concept' and a 'detailed_explanation'.
+    - The 'primary_concept' MUST be **one exact match** from the list: {topics_list_str}. **DO NOT ALTER OR ADD TO THESE TERMS.** This is crucial for clean score tracking.
+    - The 'detailed_explanation' is the brief feedback (1-2 sentence) for the user.
+
+    The entire output MUST be a single JSON object. No other text, markdown, or commentary is allowed outside the JSON structure.
+
+    JSON Format MUST be:
+    {{
+      "quiz_title": "Adaptive Focus Drill (Weak Topics: {topics_list_str})",
+      "questions": [
+        {{
+          "id": 1,
+          "type": "MCQ",
+          "question_text": "...",
+          "options": ["A: ...", "B: ...", "C: ...", "D: ..."],
+          "correct_answer": "B", 
+          "primary_concept": "{weak_topics[0] if weak_topics else 'Concept'}", 
+          "detailed_explanation": "..."
+        }},
+        // ... 9 more questions
+      ]
+    }}
+    """
+    # -------------------------------------------------------------------------
+    
+    notes_truncated = notes[:15000]
+
+    with st.spinner(f"Generating FOCUS drills on: {topics_list_str}..."):
+        # The internal helper _attempt_quiz_generation handles the API call
+        return _attempt_quiz_generation(system_prompt, notes_truncated, client)
+
+
+def generate_study_notes(raw_text, level, client):
+    prompt = f"""{get_system_prompt(level)}\nCONTENT: {raw_text[:25000]}\nOutput strictly Markdown."""
+    try:
+        completion = client.chat.completions.create(model=GROQ_MODEL, messages=[{"role": "user", "content": prompt}], temperature=0.3)
+        return completion.choices[0].message.content
+    except Exception as e:
+        return f"(Error during generation: {e})"
+
+def generate_analogies(notes, client):
+    system_prompt = """You are a creative tutor specializing in making complex scientific (Physics, Chemistry, Biology) and technical topics instantly relatable. Your task is to identify 5 key concepts from the provided study notes. For each concept, provide a detailed, clear, real-life analogy. Format the output strictly as a list of concepts and their analogies in clear Markdown. Use the format: '**[Concept Title]**' followed by 'Analogy: [The detailed analogy]'."""
+    notes_truncated = notes[:10000]
+    try:
+        with st.spinner("Generating core concepts and analogies..."):
+            completion = client.chat.completions.create(model=GROQ_MODEL, messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": f"Generate 5 analogies based on the following notes: {notes_truncated}"}], temperature=0.7)
+        return completion.choices[0].message.content
+    except Exception as e:
+        return f"Error generating analogies: {e}"
+
+def generate_specific_analogy(topic, client):
+    system_prompt = f"""You are a creative tutor. Your task is to provide a single, detailed, and clear real-life analogy for the concept: '{topic}'. The analogy must be highly relatable. Output only the analogy in clear Markdown, starting with the header '### Analogy for {topic}'."""
+    try:
+        with st.spinner(f"Generating analogy for '{topic}'..."):
+            completion = client.chat.completions.create(model=GROQ_MODEL, messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": f"Generate a detailed real-life analogy for the topic: {topic}"}], temperature=0.6)
+        return completion.choices[0].message.content
+    except Exception as e:
+        return f"Error generating analogy: {e}"
+
+def generate_qna(notes, q_type, marks, client):
+    q_type_text = ""
+    if q_type == "short":
+        q_type_text = "5 questions requiring concise, short-answer responses (approx. 50-75 words each). Format each as Q: followed by A:."
+    elif q_type == "long":
+        q_type_text = "3 questions requiring detailed, long-answer responses (approx. 150-250 words each). Format each as Q: followed by A:."
+    elif q_type == "custom":
+        q_type_text = f"5 questions suitable for an exam where each question is worth approximately {marks} marks. The length and detail should match typical answers for that mark value. Format each as Q: followed by A:."
+    system_prompt = f"You are a study guide generator. Your task is to analyze the provided study notes and generate {q_type_text} The output must be pure markdown."
+    notes_truncated = notes[:15000]
+    try:
+        with st.spinner(f"Generating {q_type} Q&A from notes..."):
+            completion = client.chat.completions.create(model=GROQ_MODEL, messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": f"Generate Q&A based on the following notes: {notes_truncated}"}], temperature=0.5)
+        return completion.choices[0].message.content
+    except Exception as e:
+        return f"Error generating Q&A: {e}"
+        
+def analyze_past_papers(text_content, image_content_list, client):
+    """
+    Analyzes past paper content using Text or Vision models.
+    """
+    system_prompt = """You are an expert exam analyst. Your primary task is to **analyze the pattern of questions** extracted from the past exam paper content. You MUST NOT generate answers to the questions.
+
+    Analyze the questions and the mark distribution to determine the most important topics and question patterns.
+
+    Output must be in clear, actionable Markdown format, focusing only on the analysis:
+    
+    1.  **Top 5 Most Important Topics:** Extract the 5 concepts/topics that appear most frequently or are tested with the most depth in the exam questions. Rank them 1 to 5 based on frequency/weightage.
+    2.  **Repeated Question Themes:** Identify questions that, while phrased differently, are essentially testing the same core information (e.g., "Explain X" and "What are the characteristics of X"). List 3-5 distinct themes.
+    3.  **High-Level Strategy:** Provide a 3-point strategy for studying based *specifically* on the trends observed in the question content.
+    """
+    
+    if image_content_list:
+        # VISION MODEL PATH
+        payload = [{"type": "text", "text": "Analyze this scanned exam paper. Focus on identifying topics and repeated questions."}]
+        for img in image_content_list: 
+            payload.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img}"}})
+        
+        try:
+            with st.spinner("👀 AI Vision is reading the scanned paper..."):
+                completion = client.chat.completions.create(
+                    model=GROQ_VISION_MODEL,
+                    messages=[{"role": "user", "content": payload}],
+                    max_tokens=2000
+                )
+            return completion.choices[0].message.content
+        except Exception as e:
+            # Fallback to Text analysis if Vision fails
+            if text_content and len(text_content) > 50:
+                fallback_msg = f"\n\n**⚠️ Note:** Visual scan analysis failed ({str(e)}). Falling back to text extraction analysis.\n\n---\n\n"
+                try:
+                    fallback_res = client.chat.completions.create(model=GROQ_MODEL, messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": f"Exam Content: {text_content[:20000]}"}]).choices[0].message.content
+                    return fallback_msg + fallback_res
+                except:
+                    return f"❌ Critical Error: Both Vision and Text analysis failed. Error: {e}"
+            else:
+                return f"❌ Error: Vision model unavailable ({e}) and no extractable text found in this document."
+
+    else:
+        # TEXT MODEL PATH
+        content_truncated = text_content[:15000]
+        try:
+            with st.spinner("Analyzing past papers for trends and important topics..."):
+                completion = client.chat.completions.create(
+                    model=GROQ_MODEL, 
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": f"Exam Content: {content_truncated}"}
+                    ],
+                    temperature=0.4
+                )
+            return completion.choices[0].message.content
+        except Exception as e:
+            return f"Error performing exam analysis: {e}"
+
+
+# --- UI INTERACTIVE LOGIC ---
+
+def process_and_update_progress(project_name, questions, user_answers):
+    """
+    Processes the quiz results, extracts concepts, and updates the database tracker.
+    Uses 'primary_concept' for robust, high-level tracking.
+    """
+    concept_scores = {} # {concept: [correct_count, total_count]}
+    
+    # Filter for valid questions before processing
+    valid_questions = [q for q in questions if isinstance(q, dict) and 'id' in q and 'primary_concept' in q]
+
+    for q in valid_questions:
+        q_id = q['id']
+        
+        # *** FIX for granularity: Use the high-level primary_concept directly ***
+        concept = q.get('primary_concept', 'Unknown Concept - Check Quiz Data') 
+        
+        user_answer = user_answers.get(q_id)
+        correct_answer = q['correct_answer']
+
+        # Determine if the answer is correct
+        is_correct = False
+        if user_answer:
+            if q['type'] == 'MCQ':
+                is_correct = (user_answer == correct_answer)
+            elif q['type'] == 'T/F':
+                is_correct = (user_answer.strip() == correct_answer.strip())
+        
+        # Aggregate scores by concept
+        if concept not in concept_scores:
+            concept_scores[concept] = [0, 0]
+        
+        concept_scores[concept][1] += 1 # Increment total attempts
+        if is_correct:
+            concept_scores[concept][0] += 1 # Increment correct attempts
+    
+    # Convert list [correct, total] to tuple (correct, total) for the DB function
+    db_scores = {k: tuple(v) for k, v in concept_scores.items()}
+    
+    # Update the database
     db.update_progress_tracker(project_name, db_scores)
+    
+    return db_scores # Return for immediate use in session state
+
 
 def display_and_grade_quiz(project_name, quiz_json_str):
+    """Renders the interactive quiz, collects answers, and shows instant feedback *in-place*."""
+    
     quiz_data = safe_json_parse(quiz_json_str)
-    if quiz_data is None: return
+    
+    if quiz_data is None:
+        st.warning("Cannot display quiz. The quiz data could not be parsed correctly. Please try generating a new quiz.")
+        return
 
     questions = quiz_data.get('questions', [])
-    st.subheader(f"🎯 {quiz_data.get('quiz_title', 'Interactive Quiz')}")
+
+    st.subheader(f"🎯 {quiz_data.get('quiz_title', 'Interactive Quiz')} ({st.session_state.quiz_type.capitalize()})")
+    st.markdown("Select your answers and click **Submit Quiz** for instant feedback.")
+
+    user_answers = st.session_state.user_answers
     
+    # Render quiz form
     with st.form(key='quiz_form'):
-        for i, q in enumerate(questions):
-            q_id = q['id']
-            st.markdown(f"**{i+1}. {q.get('primary_concept', '')}:** {q['question_text']}")
+        
+        # Filter for valid questions to render
+        valid_questions = [q for q in questions if isinstance(q, dict) and 'options' in q and 'id' in q and 'question_text' in q and 'type' in q]
+
+        # *** FIX FOR NUMBERING: Use enumerate(valid_questions) to ensure sequential numbers (q_num) ***
+        for q_index, q in enumerate(valid_questions):
             
-            if q['type'] == 'MCQ':
-                opts = [opt.split(': ')[1] if ': ' in opt else opt for opt in q['options']]
-                st.session_state.user_answers[q_id] = st.radio("Answer:", opts, key=f"q_{q_id}", index=None, disabled=st.session_state.quiz_submitted)
-                # Map answer back to A, B, C, D
-                if st.session_state.user_answers[q_id] in opts:
-                    idx = opts.index(st.session_state.user_answers[q_id])
-                    st.session_state.user_answers[q_id] = ['A','B','C','D'][idx]
-            else:
-                st.session_state.user_answers[q_id] = st.radio("Answer:", ["True", "False"], key=f"q_{q_id}", index=None, disabled=st.session_state.quiz_submitted)
+            q_id = q['id']
+            q_num = q_index + 1 # Use list index + 1 for display numbering
+            question_key = f"q_{q_id}" # Use the original LLM id for consistent answer mapping
+            
+            # Get concept for display
+            concept_display = q.get('primary_concept', 'General Concept')
+            detailed_explanation = q.get('detailed_explanation', 'No detailed explanation provided.')
+            
+            # Question rendering
+            with st.container():
+                # Display the sequential q_num instead of the potentially incorrect q_id
+                st.markdown(f"**Question {q_num} ({concept_display}):** {q['question_text']}")
+                
+                options = q['options'] 
+                user_choice = None
 
+                # T/F questions
+                if q['type'] == 'T/F':
+                    options_display = ["True", "False"] 
+                    default_index = options_display.index(user_answers.get(q_id)) if user_answers.get(q_id) in options_display else None
+                    
+                    user_choice = st.radio(
+                        "Your Answer:", 
+                        options_display, 
+                        key=question_key,
+                        index=default_index,
+                        disabled=st.session_state.quiz_submitted
+                    )
+                
+                # MCQ questions
+                elif q['type'] == 'MCQ':
+                    options_display = [opt.split(': ')[1] if ': ' in opt else opt for opt in options] 
+                    
+                    default_index = None
+                    stored_answer_letter = user_answers.get(q_id)
+                    if stored_answer_letter in ['A', 'B', 'C', 'D']:
+                        try:
+                            index = ['A', 'B', 'C', 'D'].index(stored_answer_letter)
+                            default_index = index
+                        except ValueError:
+                            pass
+
+                    user_choice_text = st.radio(
+                        "Your Answer:", 
+                        options_display, 
+                        key=question_key,
+                        index=default_index,
+                        disabled=st.session_state.quiz_submitted
+                    )
+                    
+                    if user_choice_text:
+                        try:
+                            index = options_display.index(user_choice_text)
+                            user_choice = ['A', 'B', 'C', 'D'][index]
+                        except ValueError:
+                            user_choice = None
+                    else:
+                        user_choice = None
+
+            user_answers[q_id] = user_choice
+            
+            # RENDER FEEDBACK IN-PLACE
             if st.session_state.quiz_submitted:
-                correct = q['correct_answer']
-                user = st.session_state.user_answers.get(q_id)
-                match = (user == correct) if q['type'] == 'MCQ' else (str(user) == str(correct))
-                if match: st.markdown(f'<div class="feedback-box correct-feedback">✅ Correct!</div>', unsafe_allow_html=True)
-                else: st.markdown(f'<div class="feedback-box incorrect-feedback">❌ Incorrect. Answer: {correct}.<br>{q.get("detailed_explanation","")}</div>', unsafe_allow_html=True)
-            st.markdown("---")
+                
+                correct_answer = q['correct_answer']
+                
+                # Determine the displayed correct answer
+                if q['type'] == 'T/F':
+                    correct_display = correct_answer
+                elif q['type'] == 'MCQ':
+                    correct_full_option = next((opt for opt in q['options'] if opt.startswith(correct_answer + ':')), 'N/A')
+                    correct_display = f"**{correct_answer}:** {correct_full_option.split(': ')[-1]}"
+                else:
+                    correct_display = correct_answer
 
-        if st.form_submit_button("Submit Quiz", disabled=st.session_state.quiz_submitted):
-            process_and_update_progress(project_name, questions, st.session_state.user_answers)
-            st.session_state.quiz_submitted = True
-            st.rerun()
+                # Grading logic
+                is_correct = False
+                if user_choice:
+                    if q['type'] == 'MCQ':
+                        is_correct = (user_choice == correct_answer)
+                    elif q['type'] == 'T/F':
+                        is_correct = (user_choice.strip() == correct_answer.strip())
 
-    if st.button("🔄 Reset Quiz"):
+                
+                # Render the feedback box
+                feedback_html = ""
+                
+                if is_correct:
+                    feedback_html = f'<div class="feedback-box correct-feedback"><p class="correct">✅ **CORRECT!**</p></div>'
+                else:
+                    user_selected = user_choice if user_choice else "Not answered"
+                    feedback_html = f'''
+                    <div class="feedback-box incorrect-feedback">
+                        <p class="incorrect">❌ **INCORRECT.**</p>
+                        <p><strong>Your Choice:</strong> {user_selected}</p>
+                        <p><strong>Correct Answer:</strong> {correct_display}</p>
+                        <p><strong>Concept Review:</strong> {detailed_explanation}</p>
+                    </div>
+                    '''
+                
+                st.markdown(feedback_html, unsafe_allow_html=True)
+            
+            st.markdown("---") # Separator after each question
+
+
+        col_submit, col_reset = st.columns([1, 15])
+        with col_submit:
+            # THIS IS THE FORM SUBMIT BUTTON
+            submit_button = st.form_submit_button(label='✅ Submit Quiz', type="primary", disabled=st.session_state.quiz_submitted)
+        with col_reset:
+            # CORRECTED SYNTAX
+            reset_button = st.form_submit_button(label='🔄 Reset Quiz', type="secondary")
+
+    if submit_button:
+        # --- PROCESS QUIZ RESULTS & UPDATE TRACKER ---
+        if st.session_state.current_project:
+            process_and_update_progress(st.session_state.current_project, valid_questions, user_answers)
+            
+        st.session_state.quiz_submitted = True
+        st.session_state.user_answers = user_answers 
+        st.rerun() 
+        
+    if reset_button:
         st.session_state.quiz_submitted = False
         st.session_state.user_answers = {}
         st.rerun()
 
-# --- SIDEBAR ---
+    if st.session_state.quiz_submitted:
+        score = 0
+        total_valid = len(valid_questions)
+        
+        for q in valid_questions:
+            user_answer = st.session_state.user_answers.get(q['id'])
+            correct_answer = q['correct_answer']
+            
+            is_correct = False
+            if user_answer:
+                if q['type'] == 'MCQ':
+                    is_correct = (user_answer == correct_answer)
+                elif q['type'] == 'T/F':
+                    is_correct = (user_answer.strip() == correct_answer.strip())
+            
+            if is_correct:
+                score += 1
+
+        st.success(f"## Final Score: {score}/{total_valid} 🎉")
+        if score == total_valid:
+            st.balloons()
+            # If the focus quiz was active and user got 100%, disable the focus flag
+            if st.session_state.focus_quiz_active:
+                 st.session_state.focus_quiz_active = False # Mastery achieved!
+                 st.session_state.weak_topics = [] # Clear weak topics
+                 st.info("🎯 **Mastery Achieved!** You scored 100% on the focus drill. All future quizzes will be General until new weak points emerge.")
+        
+    return
+
+# --- UTILITY FUNCTIONS ---
+
+# --- SIDEBAR (NAVIGATION) ---
 with st.sidebar:
     st.title("📚 AI Study Companion")
-    if "GROQ_API_KEY" in st.secrets: st.session_state.groq_api_key = st.secrets["GROQ_API_KEY"]
-    key_input = st.text_input("Groq API Key", type="password", value=st.session_state.groq_api_key or "")
-    if key_input: st.session_state.groq_api_key = key_input
+    st.markdown("---")
+
+    # --- API Key Handling ---
+    final_api_key = None
+    
+    if "GROQ_API_KEY" in st.secrets:
+        final_api_key = st.secrets["GROQ_API_KEY"]
+        st.success("🔑 API Key Loaded from Secrets.")
+    
+    if not final_api_key and st.session_state.groq_api_key:
+        final_api_key = st.session_state.groq_api_key
+        st.success("🔑 API Key is configured in this session.")
+        
+    with st.expander("⚙️ Groq API Key Settings", expanded=not bool(final_api_key)):
+        key_display_value = final_api_key if final_api_key else ""
+        api_key_input = st.text_input(
+            "Groq API Key (Recommended: Set in Secrets)", 
+            type="password", 
+            value=key_display_value,
+            key="api_key_input"
+        )
+        if st.session_state.api_key_input and st.session_state.api_key_input != st.session_state.groq_api_key:
+            st.session_state.groq_api_key = st.session_state.api_key_input
+            st.rerun() 
+        elif not st.session_state.api_key_input and st.session_state.groq_api_key:
+            st.session_state.groq_api_key = None
+            st.rerun()
+
+    api_key_configured = bool(final_api_key)
 
     st.markdown("---")
-    for p in db.load_all_projects():
-        if st.button(f"📄 {p}"):
-            st.session_state.current_project = p
-            st.session_state.quiz_submitted = False
-            st.session_state.quiz_data = None
-            st.rerun()
     
-    if st.button("➕ Create New Project", type="primary"):
+    # LOAD PROJECTS FROM DATABASE
+    saved_projects = db.load_all_projects()
+    
+    if saved_projects:
+        st.subheader("📁 Saved Projects")
+        for project_name in saved_projects:
+            if st.button(f"📄 **{project_name}**", use_container_width=True, key=f"btn_{project_name}"):
+                st.session_state.current_project = project_name
+                st.session_state.quiz_submitted = False 
+                st.session_state.user_answers = {} 
+                st.session_state.quiz_data = None 
+                st.session_state.quiz_type = 'general' 
+                st.session_state.exam_analysis_text = None 
+                st.session_state.exam_analysis_content_cache = None # Clear exam cache
+                st.session_state.last_uploaded_exam_id = None
+                st.session_state.weak_topics = [] # Reset weak topics on project switch
+                st.session_state.focus_quiz_active = False # Reset focus flag
+                st.rerun()
+        st.markdown("---")
+                
+    if st.button("➕ Create New Project", type="primary", use_container_width=True):
         st.session_state.current_project = None
         st.rerun()
 
-if not st.session_state.groq_api_key:
-    st.warning("Please configure your Groq API Key.")
+# --- MAIN APP LOGIC ---
+
+if not api_key_configured:
+    st.warning("🚨 Please configure your Groq API Key in the sidebar settings to start.")
     st.stop()
     
-client = Groq(api_key=st.session_state.groq_api_key)
+try:
+    client = Groq(api_key=final_api_key)
+except Exception as e:
+    st.error(f"❌ Error initializing Groq client. Please check your API key. Details: {e}")
+    st.stop()
 
-# --- MAIN APP LOGIC ---
+
+# VIEW 1: CREATE NEW PROJECT
 if st.session_state.current_project is None:
     st.title("🚀 New Study Project")
+    st.markdown("### Upload a document (PDF) and define your study level.")
+    
     uploaded_file = st.file_uploader("Upload PDF Document", type="pdf")
     
     if uploaded_file:
         col1, col2 = st.columns(2)
-        with col1: project_name = st.text_input("Project Name", value=uploaded_file.name.split('.')[0])
-        with col2: level = st.select_slider("Level", options=["Basic", "Intermediate", "Advanced"], value="Intermediate")
-        
-        if st.button("✨ Create Project"):
-            with st.spinner("Processing..."):
+        with col1:
+            project_name = st.text_input("Project Name", value=uploaded_file.name.split('.')[0])
+        with col2:
+            level = st.select_slider("Detail Level", options=["Basic", "Intermediate", "Advanced"], value="Intermediate")
+            
+        if st.button("✨ Create & Generate Study Guide", type="primary"):
+            
+            with st.spinner("Step 1: Extracting content from PDF..."):
+                # Use smart extraction here so even scanned docs work for notes (if mostly text)
                 raw_text, _ = extract_content_smart(uploaded_file)
-                if len(raw_text) > 50:
+            
+            if len(raw_text) > 50:
+                with st.spinner("Step 2: Synthesizing notes with Groq LLM..."):
                     notes = generate_study_notes(raw_text, level, client)
-                    ana = generate_analogies(notes, client)
-                    db.save_project(project_name, level, notes, raw_text, analogy_data=json.dumps({"default": ana}))
-                    st.session_state.current_project = project_name
+
+                with st.spinner("Step 3: Generating initial analogies and key concepts..."):
+                    default_analogies = generate_analogies(notes, client)
+
+                analogy_data = json.dumps({"default": default_analogies})
+                # Save the new exam_analysis field as empty JSON
+                db.save_project(project_name, level, notes, raw_text, analogy_data=analogy_data, exam_analysis="{}")
+                
+                st.session_state.current_project = project_name
+                st.success("✅ Project created, notes and analogies generated!")
+                st.balloons()
+                st.rerun()
+            else:
+                st.error("⚠️ Document text is too sparse. This appears to be a scanned file. Currently, Note Generation requires searchable text, but Exam Analysis supports scans.")
+
+
+# VIEW 2: PROJECT DASHBOARD
+else:
+    project_data = db.get_project_details(st.session_state.current_project)
+    
+    if project_data:
+        practice_data = json.loads(project_data.get('practice_data') or "{}")
+        analogy_data = json.loads(project_data.get('analogy_data') or "{}")
+        exam_analysis_data = json.loads(project_data.get('exam_analysis') or "{}")
+
+        # Header
+        col_header, col_btn = st.columns([3, 1])
+        with col_header:
+            st.title(f"📘 {project_data['name']}")
+            st.markdown(f"**Level:** *{project_data['level']}*")
+        with col_btn:
+            st.download_button("💾 Export Notes (.md)", project_data['notes'], file_name=f"{project_data['name']}_notes.md", use_container_width=True)
+
+        st.markdown("---")
+
+        # Tabs for Tools
+        tab1, tab_analogy, tab_exam, tab2, tab3 = st.tabs(["📖 Study Notes", "💡 Analogies & Concepts", "📈 Exam Analysis", "🧠 Practices", "📊 Progress Tracker"])
+        
+        # --- TAB 1: STUDY NOTES ---
+        with tab1:
+            st.header("Comprehensive Study Guide")
+            st.markdown(project_data['notes'])
+            
+        # --- TAB: ANALOGIES & CONCEPTS ---
+        with tab_analogy:
+            st.header("Real-Life Analogies for Better Understanding")
+            
+            st.subheader("Default Concepts and Analogies")
+            default_analogies = analogy_data.get('default', "No default analogies found. Click 'Generate New Analogies' to create them.")
+            
+            if st.button("🔄 Generate Default Analogies", help="Overwrite existing default analogies with new ones based on the notes."):
+                default_analogies = generate_analogies(project_data['notes'], client)
+                db.update_analogy_data(project_data['name'], "default", default_analogies)
+                st.rerun()
+
+            st.markdown(default_analogies)
+            st.markdown("---")
+            
+            st.subheader("Request a Specific Analogy")
+            topic_request = st.text_input("Enter a specific concept:", key="analogy_topic_input")
+            
+            if st.button("🎯 Explain with Analogy"):
+                if topic_request:
+                    new_analogy = generate_specific_analogy(topic_request, client)
+                    db.update_analogy_data(project_data['name'], topic_request, new_analogy)
+                    st.session_state.analogy_request = topic_request
+                    st.session_state.analogy_content = new_analogy
                     st.rerun()
                 else:
-                    st.error("⚠️ Document is scanned/empty. Notes generation requires text.")
+                    st.warning("Please enter a concept to request an analogy.")
+                    
+            if st.session_state.get('analogy_request'):
+                st.markdown(st.session_state.analogy_content)
+            elif topic_request in analogy_data:
+                 st.markdown(analogy_data[topic_request])
 
-else:
-    proj = db.get_project_details(st.session_state.current_project)
-    if proj:
-        practice_data = json.loads(proj.get('practice_data') or "{}")
-        analogy_data = json.loads(proj.get('analogy_data') or "{}")
-
-        st.title(f"📘 {proj['name']}")
-        tab1, tab_ana, tab_exam, tab_prac, tab_prog = st.tabs(["📖 Notes", "💡 Analogies", "📈 Exam Analysis", "🧠 Practice", "📊 Progress"])
-        
-        with tab1: st.markdown(proj['notes'])
-
-        with tab_ana:
-            st.subheader("Analogies")
-            st.markdown(analogy_data.get('default', ""))
-            if st.button("Refresh Analogies"):
-                new_a = generate_analogies(proj['notes'], client)
-                db.update_analogy_data(proj['name'], "default", new_a)
-                st.rerun()
-            st.divider()
-            t_req = st.text_input("Request Analogy:")
-            if st.button("Generate") and t_req:
-                res = generate_specific_analogy(t_req, client)
-                st.markdown(res)
-
+        # --- TAB: EXAM ANALYSIS (FINAL REVISION) ---
         with tab_exam:
-            st.header("Exam Analysis")
-            exam_pdf = st.file_uploader("Upload Past Paper", type="pdf", key="exam_up")
+            st.header("📈 Past Paper & Question Bank Analysis")
+            st.markdown("""
+                Upload a past paper or question bank PDF below.
+                The AI will analyze the **extracted text or scanned images** to identify key trends and repeated questions.
+            """)
+            
+            # --- FIX: Variable 'exam_pdf' distinct from 'uploaded_file' ---
+            exam_pdf = st.file_uploader("Upload Past Paper PDF", type="pdf", key="exam_pdf_uploader")
+            
             if exam_pdf:
+                # --- FIX: Using correct variable 'exam_pdf' ---
                 if st.session_state.last_uploaded_exam_id != exam_pdf.file_id:
                     with st.spinner("Reading PDF..."):
                         txt, imgs = extract_content_smart(exam_pdf)
@@ -393,88 +970,272 @@ else:
                         st.session_state.last_uploaded_exam_id = exam_pdf.file_id
                 
                 txt_c, img_c = st.session_state.exam_analysis_content_cache
-                if img_c: st.warning("Scanned PDF detected. Using Vision Model.")
                 
-                if st.button("Analyze Paper"):
-                    res = analyze_exam_paper(txt_c, img_c, client)
-                    db.update_exam_analysis_data(proj['name'], "latest", res)
+                if img_c: st.warning("📷 Scanned PDF detected. Using Vision Model.")
+                else: st.success("📄 Text PDF detected. Using Standard Model.")
+                
+                if st.button("🎯 Run Analysis", type="primary"):
+                    res = analyze_past_papers(txt_c, img_c, client)
+                    db.update_exam_analysis_data(project_data['name'], "latest", res)
                     st.session_state.exam_analysis_text = res
                     st.rerun()
             
-            disp = st.session_state.exam_analysis_text or json.loads(proj.get('exam_analysis') or "{}").get('latest')
-            if disp: st.markdown(disp)
-
-        with tab_prac:
-            st.header("Practice Tools")
-            st1, st2 = st.tabs(["Theory Q&A", "Quiz"])
+            st.divider()
             
-            with st1:
-                c1, c2, c3 = st.columns(3)
-                with c1: 
-                    if st.button("Short Q&A"):
-                        q = generate_qna(proj['notes'], "short", 0, client)
-                        db.update_practice_data(proj['name'], "short_qna", q)
+            # Display stored or generated analysis
+            analysis_to_display = st.session_state.exam_analysis_text or json.loads(project_data.get('exam_analysis') or "{}").get('latest')
+            
+            if analysis_to_display:
+                st.subheader("AI Exam Analysis Report")
+                st.markdown(analysis_to_display)
+            else:
+                st.info("Upload a past paper PDF and click 'Run Exam Analysis' to generate a report.")
+
+
+        # --- TAB 2: PRACTICES ---
+        with tab2:
+            st.header("Practice Tools")
+            sub_tab1, sub_tab2 = st.tabs(["📝 Theory Q&A", "🎯 Interactive Quiz"])
+            
+            with sub_tab1: # THEORY Q&A 
+                st.subheader("Generate Question & Answers")
+                
+                col_short, col_long, col_custom = st.columns(3)
+
+                if 'qna_display_key' not in st.session_state: st.session_state.qna_display_key = None
+                if 'qna_content' not in st.session_state: st.session_state.qna_content = None
+
+                with col_short:
+                    if st.button("Generate Short Answer (5 Qs)", key="btn_short", use_container_width=True):
+                        qna_content = generate_qna(project_data['notes'], "short", 0, client)
+                        db.update_practice_data(project_data['name'], "short_qna", qna_content)
                         st.session_state.qna_display_key = "short_qna"
-                        st.session_state.qna_content = q
+                        st.session_state.qna_content = qna_content
                         st.rerun()
-                with c2: 
-                    if st.button("Long Q&A"):
-                        q = generate_qna(proj['notes'], "long", 0, client)
-                        db.update_practice_data(proj['name'], "long_qna", q)
+                
+                with col_long:
+                    if st.button("Generate Long Answer (3 Qs)", key="btn_long", use_container_width=True):
+                        qna_content = generate_qna(project_data['notes'], "long", 0, client)
+                        db.update_practice_data(project_data['name'], "long_qna", qna_content)
                         st.session_state.qna_display_key = "long_qna"
-                        st.session_state.qna_content = q
+                        st.session_state.qna_content = qna_content
                         st.rerun()
-                with c3:
-                    marks = st.number_input("Marks", 1, 20, 5)
-                    if st.button("Custom Q&A"):
-                        q = generate_qna(proj['notes'], "custom", marks, client)
-                        st.session_state.qna_content = q
-                        st.rerun()
-                
-                d_key = st.session_state.qna_display_key
-                content = st.session_state.qna_content or practice_data.get(d_key, "") if d_key else st.session_state.qna_content
-                if content: st.markdown(content)
 
-            with st2:
-                c1, c2 = st.columns(2)
-                with c1:
-                    if st.button("General Quiz"):
-                        q = generate_interactive_drills(proj['notes'], client)
-                        if q:
-                            db.update_practice_data(proj['name'], "quiz", q)
-                            st.session_state.quiz_data = q
+                with col_custom:
+                    st.session_state.theory_marks = st.number_input("Custom Mark Value", min_value=1, max_value=25, value=st.session_state.theory_marks, key="mark_input")
+                    custom_key = f"custom_qna_{st.session_state.theory_marks}"
+                    if st.button(f"Generate Custom ({st.session_state.theory_marks} Marks)", key="btn_custom", type="secondary", use_container_width=True):
+                        qna_content = generate_qna(project_data['notes'], "custom", st.session_state.theory_marks, client)
+                        db.update_practice_data(project_data['name'], custom_key, qna_content)
+                        st.session_state.qna_display_key = custom_key
+                        st.session_state.qna_content = qna_content
+                        st.rerun()
+
+                st.divider()
+
+                display_content = ""
+                display_key = st.session_state.get('qna_display_key')
+
+                if display_key and st.session_state.qna_content:
+                    display_content = st.session_state.qna_content
+                elif display_key in practice_data:
+                    display_content = practice_data[display_key]
+                else:
+                    display_content = practice_data.get("long_qna") or practice_data.get("short_qna")
+
+                if display_content:
+                    st.markdown(display_content)
+                else:
+                    st.info("Select a generation type above to create your Theory Q&A!")
+
+
+            with sub_tab2: # INTERACTIVE QUIZ (GENERAL & ADAPTIVE)
+                st.subheader("Adaptive Practice Quiz (MCQ & T/F)")
+                
+                # Dynamic quiz generation options based on weak topics
+                weak_topics = st.session_state.weak_topics
+                
+                # *** NEW CHECK FOR CORRUPTED TOPICS ***
+                is_data_corrupted = any(len(t) > 50 for t in weak_topics) # A single topic name should not be > 50 chars
+                
+                if is_data_corrupted:
+                    st.error("🚨 **CRITICAL DATA ERROR:** Your progress tracker contains corrupted topic names (long sentences/descriptions from old quizzes). The Focus Quiz cannot be generated until this is fixed.")
+                    st.markdown("⚠️ **Action Required:** Switch to the **📊 Progress Tracker** tab and click the **⚠️ Clear Progress Data** button to wipe the bad history and enable the Focus Quiz.")
+                    st.session_state.focus_quiz_active = False # Disable focus mode until clean
+                    st.session_state.quiz_type = 'general' # Force general fallback
+                
+                elif weak_topics and not st.session_state.focus_quiz_active:
+                    st.warning(f"💡 **Recommendation:** We've identified **{len(weak_topics)}** weak topic(s). Focus on these first!")
+                    st.session_state.quiz_type = 'focused' # Default to focused if weak topics exist
+                elif st.session_state.focus_quiz_active:
+                    st.error("🚨 **FOCUS MODE ACTIVE:** You must score 100% on the current Focus Drill to return to General Quizzes.")
+                    st.session_state.quiz_type = 'focused'
+                else:
+                    st.success("🎉 All tested concepts are strong! Ready for a General Quiz.")
+                    st.session_state.quiz_type = 'general' # Default to general
+                
+                # --- QUIZ SELECTION BUTTONS ---
+                col_focus, col_general = st.columns([1, 1])
+
+                with col_focus:
+                    focus_disabled = not weak_topics and not st.session_state.focus_quiz_active or is_data_corrupted
+                    if st.button(f"Focus Quiz ({len(weak_topics)})", key="btn_focus_select", type="secondary", disabled=focus_disabled, use_container_width=True):
+                        st.session_state.quiz_type = 'focused'
+                        st.session_state.focus_quiz_active = True
+                        st.session_state.quiz_data = None # Clear previous quiz
+                        st.session_state.quiz_submitted = False
+                        st.session_state.user_answers = {}
+                        st.rerun()
+
+                with col_general:
+                    general_disabled = st.session_state.focus_quiz_active
+                    if st.button("General Quiz (Mixed)", key="btn_general_select", type="secondary", disabled=general_disabled, use_container_width=True):
+                        st.session_state.quiz_type = 'general'
+                        st.session_state.focus_quiz_active = False
+                        st.session_state.quiz_data = None # Clear previous quiz
+                        st.session_state.quiz_answers = {}
+                        st.rerun()
+
+                st.markdown("---")
+                
+                # --- GENERATION BUTTON ---
+                if st.session_state.quiz_type == 'focused' and (weak_topics or st.session_state.focus_quiz_active) and not is_data_corrupted:
+                    # Show generate button for FOCUS QUIZ
+                    if st.button(f"Generate New **FOCUS** Quiz on ({len(weak_topics)} Topics)", type="primary", use_container_width=True, key="btn_generate_focused"):
+                        
+                        quiz_content = generate_focused_drills(project_data['notes'], weak_topics, client)
+                        
+                        if quiz_content:
+                            db.update_practice_data(project_data['name'], "interactive_quiz_current", quiz_content)
+                            st.session_state.quiz_data = quiz_content
                             st.session_state.quiz_submitted = False
                             st.session_state.user_answers = {}
                             st.rerun()
-                with c2:
-                    weak = st.session_state.weak_topics
-                    if st.button(f"Focus Quiz ({len(weak)})", disabled=not weak):
-                        q = generate_focused_drills(proj['notes'], weak, client)
-                        if q:
-                            db.update_practice_data(proj['name'], "quiz", q)
-                            st.session_state.quiz_data = q
+                        else:
+                            st.error("Focus Quiz generation failed. Please try a General Quiz or ensure your API key is correct.")
+                
+                elif st.session_state.quiz_type == 'general' and not is_data_corrupted:
+                    # Show generate button for GENERAL QUIZ
+                    if st.button("Generate New **GENERAL** Quiz", type="primary", use_container_width=True, key="btn_generate_general"):
+                        
+                        quiz_content = generate_interactive_drills(project_data['notes'], client)
+                        
+                        if quiz_content:
+                            db.update_practice_data(project_data['name'], "interactive_quiz_current", quiz_content)
+                            st.session_state.quiz_data = quiz_content
                             st.session_state.quiz_submitted = False
                             st.session_state.user_answers = {}
                             st.rerun()
-                
-                q_content = st.session_state.quiz_data or practice_data.get('quiz')
-                if q_content: display_and_grade_quiz(proj['name'], q_content)
+                        else:
+                            st.error("General Quiz generation failed. Check notes/API key.")
 
-        with tab_prog:
-            st.header("Progress")
-            if st.button("Clear Data"):
-                db.reset_progress_tracker(proj['name'])
+                st.divider()
+                
+                # Load the currently active quiz
+                quiz_content_stored = st.session_state.quiz_data or practice_data.get('interactive_quiz_current')
+
+                if quiz_content_stored and not is_data_corrupted:
+                    display_and_grade_quiz(project_data['name'], quiz_content_stored)
+                elif not is_data_corrupted:
+                    st.info("Select a quiz type and click 'Generate' to start your practice.")
+
+
+        # --- TAB 3: PROGRESS TRACKER ---
+        with tab3:
+            st.header("📊 Study Progress Tracker")
+            
+            progress_tracker = json.loads(practice_data.get('progress_tracker') or "{}")
+            
+            # Reset button for progress tracker
+            if st.button("⚠️ Clear Progress Data", type="secondary", help="This will delete all your quiz scores and progress history for this project. Use this to reset the adaptive logic after a code update or data corruption."):
+                db.reset_progress_tracker(project_data['name'])
+                st.session_state.weak_topics = []
+                st.session_state.focus_quiz_active = False
+                st.session_state.quiz_data = None
+                st.session_state.quiz_submitted = False
+                st.info("✅ Progress tracker data cleared successfully. Please start a new General Quiz.")
                 st.rerun()
             
-            tracker = json.loads(practice_data.get('progress_tracker') or "{}")
-            data = []
-            weak_list = []
-            for k,v in tracker.items():
-                acc = (v['correct']/v['total']*100) if v['total'] > 0 else 0
-                status = "🟢 Strong" if acc > 80 else "🔴 Weak"
-                if acc <= 80: weak_list.append(k)
-                data.append({"Topic": k, "Score": f"{acc:.1f}%", "Attempts": v['total'], "Status": status})
+            st.markdown("---")
             
-            st.session_state.weak_topics = weak_list
-            if data: st.dataframe(data)
-            else: st.info("No data yet.")
+            # Reset weak topics list for fresh recalculation
+            current_weak_topics = []
+            is_corrupted_in_tracker = False
+
+            if not progress_tracker:
+                st.info("Attempt the interactive quizzes to start tracking your performance by concept.")
+            else:
+                st.subheader("Performance Breakdown by Concept (High-Level Topics)")
+                
+                # Prepare data for display
+                progress_list = []
+                for concept, stats in progress_tracker.items():
+                    total = stats['total']
+                    correct = stats['correct']
+                    percentage = (correct / total) * 100 if total > 0 else 0
+                    
+                    # Check for corruption here as well
+                    if len(concept) > 50:
+                        is_corrupted_in_tracker = True
+                        status = "❗ CORRUPTED DATA"
+                    else:
+                        status = ""
+                        
+                        # Apply adaptive logic only if data is clean
+                        if percentage < WEAK_TOPIC_ACCURACY_THRESHOLD * 100:
+                            status = "Weak Point 🚨"
+                            current_weak_topics.append(concept)
+                        elif percentage == 100:
+                            status = "Strong Concept 💪"
+                        elif percentage >= WEAK_TOPIC_ACCURACY_THRESHOLD * 100:
+                            status = "Good Progress 👍"
+                            
+                        # Add Low Data warning separately
+                        if total < WEAK_TOPIC_MIN_ATTEMPTS:
+                            if "Weak Point" not in status:
+                                 status = "New/Low Data (Test More) 💡"
+                            else:
+                                 status += " (Low Data)"
+
+                    progress_list.append({
+                        "Concept": concept,
+                        "Accuracy": f"{percentage:.1f}%",
+                        "Attempts": total,
+                        "Status": status
+                    })
+                
+                # Update the session state with the new list of weak topics
+                st.session_state.weak_topics = current_weak_topics
+
+                # Sort by Status (Corrupted first, then Weak)
+                sorted_progress = sorted(progress_list, key=lambda x: (x['Status'] != "❗ CORRUPTED DATA", x['Status'] != "Weak Point 🚨", x['Status'] != "New/Low Data (Test More) 💡", x['Accuracy']), reverse=False)
+
+                st.dataframe(
+                    sorted_progress,
+                    column_order=["Concept", "Accuracy", "Attempts", "Status"],
+                    hide_index=True,
+                    use_container_width=True
+                )
+                
+                # Show weak topics for explicit feedback
+                if is_corrupted_in_tracker:
+                    st.error("### 🚨 CORRUPTED DATA DETECTED! You must click the '⚠️ Clear Progress Data' button above to fix the broken topic list and enable the Focus Quiz.")
+                    st.session_state.focus_quiz_active = False
+                elif st.session_state.weak_topics:
+                    
+                    st.error(f"### 🚨 Weak Points Identified ({len(st.session_state.weak_topics)} Topics):\n\nYour scores show you need more practice on:\n* " + "\n* ".join(st.session_state.weak_topics))
+                    st.markdown("Go to the **Interactive Quiz** tab and select the **Focus Quiz** option to start an adaptive practice session on these specific topics. **This will be the default quiz type until mastery is achieved.**")
+                    
+                    # Ensure focus is automatically activated for aggressive adaptation
+                    if not st.session_state.focus_quiz_active:
+                         st.session_state.focus_quiz_active = True
+                         st.session_state.quiz_data = None # Clear current quiz to force new focused one
+                         st.info("Focus Mode Activated. Please switch to the **Interactive Quiz** tab to begin a focused drill.")
+
+                else:
+                    st.success("### Great work! All tested concepts are currently Strong or Good Progress. Continue with General Quizzes!")
+                    st.session_state.focus_quiz_active = False # Ensure focus is off if no weak topics
+
+            
+    else:
+        st.error("⚠️ Error loading project data.")
