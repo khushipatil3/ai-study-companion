@@ -3,11 +3,11 @@ import fitz # PyMuPDF for PDF processing
 from groq import Groq
 import sqlite3
 import json
-import base64 
+import base64
 
 # --- MODEL CONSTANT ---
 # Current stable Groq model for fast, high-quality responses.
-GROQ_MODEL = "llama-3.1-8b-instant" 
+GROQ_MODEL = "llama-3.1-8b-instant"
 
 # --- CONFIGURABLE THRESHOLDS ---
 WEAK_TOPIC_ACCURACY_THRESHOLD = 0.80 # Below 80% is weak
@@ -1229,6 +1229,3 @@ else:
             
     else:
         st.error("⚠️ Error loading project data.")
-
-
-this is my code
