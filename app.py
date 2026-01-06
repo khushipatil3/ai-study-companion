@@ -6,9 +6,10 @@ import json
 import base64
 
 # --- MODEL CONSTANTS ---
-# Updated to the latest stable Instruct models (No "preview" tags)
-GROQ_MODEL = "llama-3.3-70b-versatile" 
-GROQ_VISION_MODEL = "llama-3.2-11b-vision-instruct" 
+# Text Model (High Intelligence)
+GROQ_MODEL = "llama-3.3-70b-versatile"
+# Vision Model (Updated to 90b Instruct to fix 404/Decommissioned errors)
+GROQ_VISION_MODEL = "llama-3.2-90b-vision-instruct"
 
 # --- CONFIGURABLE THRESHOLDS ---
 WEAK_TOPIC_ACCURACY_THRESHOLD = 0.80 
@@ -384,8 +385,11 @@ else:
 
         with tab_exam:
             st.header("Exam Analysis")
+            # --- FIX: Variable 'exam_pdf' distinct from 'uploaded_file' ---
             exam_pdf = st.file_uploader("Upload Past Paper", type="pdf", key="exam_up")
+            
             if exam_pdf:
+                # --- FIX: Using correct variable 'exam_pdf' ---
                 if st.session_state.last_uploaded_exam_id != exam_pdf.file_id:
                     with st.spinner("Reading PDF..."):
                         txt, imgs = extract_content_smart(exam_pdf)
@@ -393,7 +397,8 @@ else:
                         st.session_state.last_uploaded_exam_id = exam_pdf.file_id
                 
                 txt_c, img_c = st.session_state.exam_analysis_content_cache
-                if img_c: st.warning("Scanned PDF detected. Using Vision Model.")
+                if img_c: st.warning("📷 Scanned PDF detected. Using Vision Model.")
+                else: st.success("📄 Text PDF detected. Using Standard Model.")
                 
                 if st.button("Analyze Paper"):
                     res = analyze_exam_paper(txt_c, img_c, client)
