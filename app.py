@@ -9,10 +9,6 @@ import base64
 GROQ_MODEL = "llama-3.1-8b-instant" 
 GROQ_VISION_MODEL = "llama-3.2-11b-vision-preview"
 
-# --- CONFIGURABLE THRESHOLDS ---
-WEAK_TOPIC_ACCURACY_THRESHOLD = 0.80 
-WEAK_TOPIC_MIN_ATTEMPTS = 3          
-
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="AI Study Companion", page_icon="🎓", layout="wide")
 
@@ -21,9 +17,6 @@ st.markdown("""
 <style>
     .main { background-color: #f0f2f6; color: #1c1e21; }
     .css-1d3f8rz { background-color: #ffffff; }
-    #MainMenu {visibility: hidden;}
-    .stDeployButton {display:none;}
-    footer {visibility: hidden;}
     .correct { color: green; font-weight: bold; }
     .incorrect { color: red; font-weight: bold; }
     .feedback-box { padding: 10px; margin: 5px 0; border-radius: 5px; }
@@ -56,7 +49,6 @@ class StudyDB:
                 exam_analysis TEXT
             )
         ''')
-        # Migration check
         for col in ['practice_data', 'analogy_data', 'exam_analysis']:
             try:
                 c.execute(f"SELECT {col} FROM projects LIMIT 1")
@@ -287,13 +279,14 @@ with st.sidebar:
     
     st.markdown("---")
     for p in db.load_all_projects():
-        if st.button(f"📄 {p}", use_container_width=True):
+        # UPDATED: Replaced use_container_width with width='stretch' per 2026 deprecation
+        if st.button(f"📄 {p}"): 
             st.session_state.current_project = p
             st.session_state.quiz_submitted = False
             st.session_state.quiz_data = None
             st.rerun()
             
-    if st.button("➕ New Project", use_container_width=True):
+    if st.button("➕ New Project"):
         st.session_state.current_project = None
         st.rerun()
 
@@ -327,16 +320,16 @@ else:
     
     with t2:
         st.header("Exam Analysis")
-        # VARIABLE: uploaded_pdf (Used here to avoid conflict)
-        uploaded_pdf = st.file_uploader("Upload Exam PDF", type="pdf", key="exam_up")
+        # VARIABLE: exam_pdf (Explicitly distinct)
+        exam_pdf = st.file_uploader("Upload Exam PDF", type="pdf", key="exam_up")
         
-        if uploaded_pdf:
-            # FIX: Using uploaded_pdf.file_id
-            if st.session_state.last_uploaded_exam_id != uploaded_pdf.file_id:
+        if exam_pdf:
+            # FIX: Using exam_pdf.file_id
+            if st.session_state.last_uploaded_exam_id != exam_pdf.file_id:
                 with st.spinner("Reading..."):
-                    txt, imgs = extract_content_smart(uploaded_pdf)
+                    txt, imgs = extract_content_smart(exam_pdf)
                     st.session_state.exam_analysis_content_cache = (txt, imgs)
-                    st.session_state.last_uploaded_exam_id = uploaded_pdf.file_id
+                    st.session_state.last_uploaded_exam_id = exam_pdf.file_id
             
             txt_c, img_c = st.session_state.exam_analysis_content_cache
             if img_c: st.warning("Scanned PDF. Using Vision Model.")
@@ -368,8 +361,5 @@ else:
         
         tracker = json.loads(json.loads(proj.get('practice_data') or "{}").get('progress_tracker') or "{}")
         data = [{"Topic": k, "Score": f"{(v['correct']/v['total']*100):.0f}%"} for k,v in tracker.items()]
-        # FIX: Replaced use_container_width with width='stretch' if using newer streamlit, 
-        # but to be safe we just remove the deprecated arg if it causes issues, 
-        # or use use_container_width=True which is still valid in most versions.
-        # Given your log error, I will simply omit it to be safe, or use it if valid.
-        if data: st.dataframe(data, use_container_width=True)
+        # FIX: Replaced use_container_width with width='stretch' to fix 2026 error
+        if data: st.dataframe(data, width=1000)
