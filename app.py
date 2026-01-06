@@ -6,9 +6,9 @@ import json
 import base64
 
 # --- MODEL CONSTANTS ---
-# Using the latest stable models
-GROQ_MODEL = "llama-3.3-70b-versatile"
-GROQ_VISION_MODEL = "llama-3.2-90b-vision-preview"
+# Updated to the latest stable Instruct models (No "preview" tags)
+GROQ_MODEL = "llama-3.3-70b-versatile" 
+GROQ_VISION_MODEL = "llama-3.2-11b-vision-instruct" 
 
 # --- CONFIGURABLE THRESHOLDS ---
 WEAK_TOPIC_ACCURACY_THRESHOLD = 0.80 
