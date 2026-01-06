@@ -1,6 +1,3 @@
 streamlit
 pymupdf
 groq
-pytesseract
-pillow
-pdf2image
