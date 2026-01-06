@@ -1,13 +1,13 @@
 import streamlit as st
-import fitz # PyMuPDF for PDF processing
+import fitz  # PyMuPDF for PDF processing
 from groq import Groq
 import sqlite3
 import json
-import base64 
+import base64
 
 # --- MODEL CONSTANTS ---
-GROQ_MODEL = "llama-3.1-8b-instant" 
-# New Vision model for scanned exam papers
+# Using the latest stable models
+GROQ_MODEL = "llama-3.3-70b-versatile"
 GROQ_VISION_MODEL = "llama-3.2-90b-vision-preview"
 
 # --- CONFIGURABLE THRESHOLDS ---
@@ -23,7 +23,6 @@ st.markdown("""
     .main { background-color: #f0f2f6; color: #1c1e21; }
     .css-1d3f8rz { background-color: #ffffff; }
     #MainMenu {visibility: hidden;}
-    .stDeployButton {display:none;}
     footer {visibility: hidden;}
     .correct { color: green; font-weight: bold; }
     .incorrect { color: red; font-weight: bold; }
@@ -57,6 +56,7 @@ class StudyDB:
                 exam_analysis TEXT
             )
         ''')
+        # Schema migration to ensure all columns exist
         for col in ['practice_data', 'analogy_data', 'exam_analysis']:
             try:
                 c.execute(f"SELECT {col} FROM projects LIMIT 1")
@@ -76,20 +76,20 @@ class StudyDB:
         conn.commit()
         conn.close()
 
-    def update_project_json_field(self, name, field_name, key, content):
-        project_data = self.get_project_details(name)
-        if not project_data: return
-        data_dict = json.loads(project_data.get(field_name) or "{}")
-        data_dict[key] = content
+    def update_json_field(self, name, field, key, content):
+        proj = self.get_project_details(name)
+        if not proj: return
+        data = json.loads(proj.get(field) or "{}")
+        data[key] = content
         conn = self.connect()
         c = conn.cursor()
-        c.execute(f'UPDATE projects SET {field_name} = ? WHERE name = ?', (json.dumps(data_dict), name))
+        c.execute(f'UPDATE projects SET {field} = ? WHERE name = ?', (json.dumps(data), name))
         conn.commit()
         conn.close()
         
-    def update_practice_data(self, name, key, content): return self.update_project_json_field(name, 'practice_data', key, content)
-    def update_analogy_data(self, name, key, content): return self.update_project_json_field(name, 'analogy_data', key, content)
-    def update_exam_analysis_data(self, name, key, content): return self.update_project_json_field(name, 'exam_analysis', key, content)
+    def update_practice_data(self, name, key, content): return self.update_json_field(name, 'practice_data', key, content)
+    def update_analogy_data(self, name, key, content): return self.update_json_field(name, 'analogy_data', key, content)
+    def update_exam_analysis_data(self, name, key, content): return self.update_json_field(name, 'exam_analysis', key, content)
 
     def load_all_projects(self):
         conn = self.connect()
@@ -111,31 +111,31 @@ class StudyDB:
         return None
         
     def update_progress_tracker(self, project_name, concept_scores):
-        project_data = self.get_project_details(project_name)
-        if not project_data: return
-        practice_dict = json.loads(project_data.get('practice_data') or "{}")
-        tracker = json.loads(practice_dict.get('progress_tracker') or "{}")
+        proj = self.get_project_details(project_name)
+        if not proj: return
+        p_data = json.loads(proj.get('practice_data') or "{}")
+        tracker = json.loads(p_data.get('progress_tracker') or "{}")
 
         for concept, (correct, total) in concept_scores.items():
             if concept not in tracker: tracker[concept] = {"correct": 0, "total": 0}
             tracker[concept]["correct"] += correct
             tracker[concept]["total"] += total
         
-        practice_dict['progress_tracker'] = json.dumps(tracker)
+        p_data['progress_tracker'] = json.dumps(tracker)
         conn = self.connect()
         c = conn.cursor()
-        c.execute('UPDATE projects SET practice_data = ? WHERE name = ?', (json.dumps(practice_dict), project_name))
+        c.execute('UPDATE projects SET practice_data = ? WHERE name = ?', (json.dumps(p_data), project_name))
         conn.commit()
         conn.close()
 
     def reset_progress_tracker(self, project_name):
-        project_data = self.get_project_details(project_name)
-        if not project_data: return
-        practice_dict = json.loads(project_data.get('practice_data') or "{}")
-        practice_dict['progress_tracker'] = json.dumps({})
+        proj = self.get_project_details(project_name)
+        if not proj: return
+        p_data = json.loads(proj.get('practice_data') or "{}")
+        p_data['progress_tracker'] = json.dumps({}) 
         conn = self.connect()
         c = conn.cursor()
-        c.execute('UPDATE projects SET practice_data = ? WHERE name = ?', (json.dumps(practice_dict), project_name))
+        c.execute('UPDATE projects SET practice_data = ? WHERE name = ?', (json.dumps(p_data), project_name))
         conn.commit()
         conn.close()
 
@@ -151,7 +151,7 @@ if 'user_answers' not in st.session_state: st.session_state.user_answers = {}
 if 'quiz_type' not in st.session_state: st.session_state.quiz_type = 'general'
 if 'exam_analysis_text' not in st.session_state: st.session_state.exam_analysis_text = None
 if 'exam_analysis_content_cache' not in st.session_state: st.session_state.exam_analysis_content_cache = None
-if 'last_uploaded_exam_pdf_id' not in st.session_state: st.session_state.last_uploaded_exam_pdf_id = None
+if 'last_uploaded_exam_id' not in st.session_state: st.session_state.last_uploaded_exam_id = None
 if 'weak_topics' not in st.session_state: st.session_state.weak_topics = []
 if 'focus_quiz_active' not in st.session_state: st.session_state.focus_quiz_active = False
 if 'qna_display_key' not in st.session_state: st.session_state.qna_display_key = None
@@ -170,18 +170,11 @@ def safe_json_parse(json_str):
         return json.loads(clean)
     except: return None
 
-# --- NEW UTILITY FOR VISION/TEXT ---
 def pdf_page_to_base64(page):
     pix = page.get_pixmap()
     return base64.b64encode(pix.tobytes("png")).decode('utf-8')
 
 def extract_content_smart(uploaded_file):
-    """
-    Intelligently extracts content. 
-    Returns: (text_content, images_list_b64)
-    If text is sufficient, images_list_b64 is None.
-    If text is sparse (scan), text_content is None and images_list_b64 is populated.
-    """
     uploaded_file.seek(0)
     doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
     full_text = ""
@@ -198,45 +191,19 @@ def extract_content_smart(uploaded_file):
             images.append(pdf_page_to_base64(doc[i]))
         return "", images
     else:
-        for page in doc: full_text += page.get_text() + "\n--- PAGE_BREAK ---\n"
+        for page in doc: full_text += page.get_text() + "\n"
         return full_text, None
 
 # --- LLM FUNCTIONS ---
 def get_system_prompt(level):
-    if level == "Basic": return "Act as a Tutor. GOAL: Pass the exam. Focus on definitions. Output strictly Markdown."
-    elif level == "Intermediate": return "Act as a Professor. GOAL: Solid understanding. Output strictly Markdown."
-    else: return "Act as a Subject Matter Expert. GOAL: Mastery. Output strictly Markdown."
+    if level == "Basic": return "Act as a Tutor. GOAL: Pass the exam. Focus on definitions."
+    elif level == "Intermediate": return "Act as a Professor. GOAL: Solid understanding."
+    else: return "Act as a Subject Matter Expert. GOAL: Mastery."
 
-def _attempt_quiz_generation(system_prompt, notes_truncated, client):
+def generate_study_notes(text, level, client):
+    prompt = f"{get_system_prompt(level)}\nCONTENT: {text[:25000]}\nOutput strictly Markdown."
     try:
-        completion = client.chat.completions.create(
-            model=GROQ_MODEL, messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Generate 10 questions in strict JSON format based on these notes: {notes_truncated}"}
-            ],
-            response_format={"type": "json_object"}, temperature=0.8
-        )
-        return completion.choices[0].message.content
-    except Exception as e:
-        if 'invalid_api_key' in str(e): st.error("❌ API Key Error: Check sidebar settings.")
-        return None
-
-def generate_interactive_drills(notes, client):
-    system_prompt = """You are a quiz master. Generate a quiz with 10 questions total (5 MCQ, 5 T/F).
-    JSON Format: {"quiz_title": "Drill", "questions": [{"id": 1, "type": "MCQ", "question_text": "...", "options": ["A: ..","B: .."], "correct_answer": "A", "primary_concept": "Concept", "detailed_explanation": "..."}]}"""
-    return _attempt_quiz_generation(system_prompt, notes[:15000], client)
-
-def generate_focused_drills(notes, weak_topics, client):
-    t_str = ", ".join(weak_topics)
-    system_prompt = f"""Generate JSON quiz for topics: {t_str}.
-    JSON Format: {"quiz_title": "Focus Drill", "questions": [{"id": 1, "type": "MCQ", "question_text": "...", "options": ["A: ..","B: .."], "correct_answer": "A", "primary_concept": "Concept", "detailed_explanation": "..."}]}"""
-    return _attempt_quiz_generation(system_prompt, notes[:15000], client)
-
-def generate_study_notes(raw_text, level, client):
-    prompt = f"""{get_system_prompt(level)}\nCONTENT: {raw_text[:25000]}\nOutput strictly Markdown."""
-    try:
-        completion = client.chat.completions.create(model=GROQ_MODEL, messages=[{"role": "user", "content": prompt}], temperature=0.3)
-        return completion.choices[0].message.content
+        return client.chat.completions.create(model=GROQ_MODEL, messages=[{"role": "user", "content": prompt}]).choices[0].message.content
     except Exception as e: return f"Error: {e}"
 
 def generate_analogies(notes, client):
@@ -257,36 +224,35 @@ def generate_qna(notes, q_type, marks, client):
         return client.chat.completions.create(model=GROQ_MODEL, messages=[{"role": "user", "content": f"{prompt} Content: {notes[:15000]}"}]).choices[0].message.content
     except: return "Error."
 
-def analyze_past_papers(text_content, image_content, client):
-    """
-    Robust Analysis: Tries Vision, Falls back to Text if Vision fails.
-    """
-    prompt_text = "Analyze this exam paper. List: 1. High-Priority Topics. 2. Question Patterns. 3. Strategic Advice."
-    
-    if image_content:
-        # Try Vision first
+def generate_interactive_drills(notes, client):
+    prompt = """Generate a JSON quiz with 10 questions (5 MCQ, 5 T/F).
+    JSON Format: {"quiz_title": "Drill", "questions": [{"id": 1, "type": "MCQ", "question_text": "...", "options": ["A: ..","B: .."], "correct_answer": "A", "primary_concept": "Concept", "detailed_explanation": "..."}]}"""
+    try:
+        return client.chat.completions.create(model=GROQ_MODEL, messages=[{"role": "system", "content": prompt}, {"role": "user", "content": notes[:15000]}], response_format={"type": "json_object"}).choices[0].message.content
+    except: return None
+
+def generate_focused_drills(notes, topics, client):
+    t_str = ", ".join(topics)
+    prompt = f"""Generate JSON quiz for topics: {t_str}.
+    JSON Format: {"quiz_title": "Focus Drill", "questions": [{"id": 1, "type": "MCQ", "question_text": "...", "options": ["A: ..","B: .."], "correct_answer": "A", "primary_concept": "Concept", "detailed_explanation": "..."}]}"""
+    try:
+        return client.chat.completions.create(model=GROQ_MODEL, messages=[{"role": "system", "content": prompt}, {"role": "user", "content": notes[:15000]}], response_format={"type": "json_object"}).choices[0].message.content
+    except: return None
+
+def analyze_exam_paper(txt, imgs, client):
+    prompt = "Analyze this exam paper. List: 1. High-Priority Topics. 2. Question Patterns. 3. Strategic Advice."
+    if imgs:
         payload = [{"type": "text", "text": "Analyze this scanned exam paper."}]
-        for img in image_content: payload.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img}"}})
+        for img in imgs: payload.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img}"}})
         try:
             return client.chat.completions.create(model=GROQ_VISION_MODEL, messages=[{"role": "user", "content": payload}], max_tokens=2000).choices[0].message.content
-        except Exception as e:
-            # Fallback to Text analysis if Vision fails
-            if text_content and len(text_content) > 50:
-                fallback_msg = f"\n\n**⚠️ Note:** Visual scan analysis failed ({str(e)}). Falling back to text extraction analysis.\n\n---\n\n"
-                try:
-                    fallback_res = client.chat.completions.create(model=GROQ_MODEL, messages=[{"role": "user", "content": f"{prompt_text} Content: {text_content[:20000]}"}]).choices[0].message.content
-                    return fallback_msg + fallback_res
-                except:
-                    return f"❌ Critical Error: Both Vision and Text analysis failed. Error: {e}"
-            else:
-                return f"❌ Error: Vision model unavailable ({e}) and no extractable text found in this document."
+        except Exception as e: return f"Vision Error: {e}"
     else:
-        # Text only path
         try:
-            return client.chat.completions.create(model=GROQ_MODEL, messages=[{"role": "user", "content": f"{prompt_text} Content: {text_content[:20000]}"}]).choices[0].message.content
-        except Exception as e: return f"Text Analysis Error: {e}"
+            return client.chat.completions.create(model=GROQ_MODEL, messages=[{"role": "user", "content": f"{prompt} Content: {txt[:20000]}"}]).choices[0].message.content
+        except Exception as e: return f"Text Error: {e}"
 
-# --- UI INTERACTIVE LOGIC ---
+# --- UI LOGIC ---
 def process_and_update_progress(project_name, questions, user_answers):
     scores = {} 
     valid_questions = [q for q in questions if 'id' in q]
@@ -320,6 +286,7 @@ def display_and_grade_quiz(project_name, quiz_json_str):
             if q['type'] == 'MCQ':
                 opts = [opt.split(': ')[1] if ': ' in opt else opt for opt in q['options']]
                 st.session_state.user_answers[q_id] = st.radio("Answer:", opts, key=f"q_{q_id}", index=None, disabled=st.session_state.quiz_submitted)
+                # Map answer back to A, B, C, D
                 if st.session_state.user_answers[q_id] in opts:
                     idx = opts.index(st.session_state.user_answers[q_id])
                     st.session_state.user_answers[q_id] = ['A','B','C','D'][idx]
@@ -381,7 +348,6 @@ if st.session_state.current_project is None:
         
         if st.button("✨ Create Project"):
             with st.spinner("Processing..."):
-                # Using smart extraction to handle both text and scans for Note Generation as well
                 raw_text, _ = extract_content_smart(uploaded_file)
                 if len(raw_text) > 50:
                     notes = generate_study_notes(raw_text, level, client)
@@ -390,7 +356,7 @@ if st.session_state.current_project is None:
                     st.session_state.current_project = project_name
                     st.rerun()
                 else:
-                    st.error("⚠️ Document is scanned/empty. Currently, Notes generation requires text. Exam Analysis can handle scans.")
+                    st.error("⚠️ Document is scanned/empty. Notes generation requires text.")
 
 else:
     proj = db.get_project_details(st.session_state.current_project)
@@ -418,21 +384,16 @@ else:
 
         with tab_exam:
             st.header("Exam Analysis")
-            
-            # --- FIX: Use unique variable 'uploaded_pdf' for this tab ---
-            uploaded_pdf = st.file_uploader("Upload Past Paper", type="pdf", key="exam_up")
-            
-            if uploaded_pdf:
-                # --- FIX: Use uploaded_pdf.file_id to prevent NameError ---
-                if st.session_state.last_uploaded_exam_pdf_id != uploaded_pdf.file_id:
+            exam_pdf = st.file_uploader("Upload Past Paper", type="pdf", key="exam_up")
+            if exam_pdf:
+                if st.session_state.last_uploaded_exam_id != exam_pdf.file_id:
                     with st.spinner("Reading PDF..."):
-                        txt, imgs = extract_content_smart(uploaded_pdf)
+                        txt, imgs = extract_content_smart(exam_pdf)
                         st.session_state.exam_analysis_content_cache = (txt, imgs)
-                        st.session_state.last_uploaded_exam_pdf_id = uploaded_pdf.file_id
+                        st.session_state.last_uploaded_exam_id = exam_pdf.file_id
                 
                 txt_c, img_c = st.session_state.exam_analysis_content_cache
-                if img_c: st.warning("📷 Scanned PDF detected. Using Vision Model.")
-                else: st.success("📄 Text PDF detected. Using Standard Model.")
+                if img_c: st.warning("Scanned PDF detected. Using Vision Model.")
                 
                 if st.button("Analyze Paper"):
                     res = analyze_exam_paper(txt_c, img_c, client)
