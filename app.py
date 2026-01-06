@@ -279,7 +279,6 @@ with st.sidebar:
     
     st.markdown("---")
     for p in db.load_all_projects():
-        # UPDATED: Replaced use_container_width with width='stretch' per 2026 deprecation
         if st.button(f"📄 {p}"): 
             st.session_state.current_project = p
             st.session_state.quiz_submitted = False
@@ -361,5 +360,5 @@ else:
         
         tracker = json.loads(json.loads(proj.get('practice_data') or "{}").get('progress_tracker') or "{}")
         data = [{"Topic": k, "Score": f"{(v['correct']/v['total']*100):.0f}%"} for k,v in tracker.items()]
-        # FIX: Replaced use_container_width with width='stretch' to fix 2026 error
-        if data: st.dataframe(data, width=1000)
+        
+        if data: st.dataframe(data)
