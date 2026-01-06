@@ -3,7 +3,7 @@ import fitz # PyMuPDF for PDF processing
 from groq import Groq
 import sqlite3
 import json
-import base64 
+import base64
 
 # --- MODEL CONSTANT ---
 # Current stable Groq model for fast, high-quality responses.
