@@ -8,6 +8,7 @@ import base64
 # --- MODEL CONSTANT ---
 # Current stable Groq model for fast, high-quality responses.
 GROQ_MODEL = "llama-3.1-8b-instant"
+GROQ_VISION_MODEL = "llama-3.2-90b-vision-preview"
 
 # --- CONFIGURABLE THRESHOLDS ---
 WEAK_TOPIC_ACCURACY_THRESHOLD = 0.80 # Below 80% is weak
@@ -757,6 +758,7 @@ def extract_content_text_only(uploaded_file):
     bar.empty()
     return full_content
 
+
 # --- SIDEBAR (NAVIGATION) ---
 with st.sidebar:
     st.title("📚 AI Study Companion")
@@ -941,18 +943,44 @@ else:
             # Logic to handle PDF upload and extraction
             if uploaded_pdf:
                 if not uploaded_pdf.file_id == st.session_state.get('last_uploaded_exam_pdf_id'):
-                    with st.spinner("Extracting text from PDF..."):
-                        pdf_text = extract_content_text_only(uploaded_pdf)
-                    
-                    st.session_state.exam_analysis_pdf_content = pdf_text
-                    st.session_state.last_uploaded_exam_pdf_id = uploaded_file.file_id
-                    
-                    if len(pdf_text.strip()) < 100:
-                        st.warning("⚠️ **Low Text Quality Detected.** This likely means the PDF contains scanned images of questions, which the application cannot read. The analysis will fail unless you upload a digitally created (searchable) PDF.")
-                    st.info(f"Loaded **{len(pdf_text)}** characters of text for analysis.")
-                    
-                else:
-                    st.info(f"Using previously extracted content (**{len(st.session_state.exam_analysis_pdf_content)}** characters) from the uploaded file.")
+                    with st.spinner("Extracting content from PDF..."):
+    pdf_text = extract_content_text_only(uploaded_pdf)
+
+# --- SMART DETECTION ---
+is_scanned_pdf = len(pdf_text.strip()) < 100
+
+if is_scanned_pdf:
+    st.warning("📷 Scanned PDF detected. Switching to AI Vision analysis.")
+
+    images_base64 = extract_pdf_pages_as_images(uploaded_pdf)
+
+    if st.button("🎯 Run Vision-Based Exam Analysis", type="primary"):
+        analysis_result = analyze_scanned_exam_papers(images_base64, client)
+
+        db.update_exam_analysis_data(
+            project_data['name'],
+            "vision_exam_analysis",
+            analysis_result
+        )
+
+        st.session_state.exam_analysis_text = analysis_result
+        st.rerun()
+
+else:
+    st.success("📄 Searchable PDF detected.")
+
+    if st.button("🎯 Run Exam Analysis", type="primary"):
+        analysis_result = analyze_past_papers(pdf_text, client)
+
+        db.update_exam_analysis_data(
+            project_data['name'],
+            "text_exam_analysis",
+            analysis_result
+        )
+
+        st.session_state.exam_analysis_text = analysis_result
+        st.rerun()
+
 
                 # 3. Analysis Button
                 if st.button("🎯 Run Exam Analysis", type="primary"):
