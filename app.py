@@ -611,7 +611,7 @@ else:
                     with st.spinner("Reading PDF..."):
                         txt, imgs = extract_content_smart(uploaded_pdf)
                         st.session_state.exam_analysis_content_cache = (txt, imgs)
-                        # --- FIX: USE CORRECT VARIABLE NAME 'uploaded_pdf' ---
+                        # --- FIX: USED CORRECT VARIABLE NAME 'uploaded_pdf' ---
                         st.session_state.last_uploaded_exam_id = uploaded_pdf.file_id 
                 
                 txt_content, img_content = st.session_state.exam_analysis_content_cache
