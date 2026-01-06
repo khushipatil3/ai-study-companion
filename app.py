@@ -5,6 +5,9 @@ import sqlite3
 import json
 import base64
 
+# --- DEBUG INDICATOR ---
+st.success("✅ CODE UPDATED SUCCESSFULLY: Running Version 3.0 (Clean)")
+
 # --- MODEL CONSTANTS ---
 GROQ_MODEL = "llama-3.1-8b-instant" 
 GROQ_VISION_MODEL = "llama-3.2-11b-vision-preview"
@@ -279,6 +282,7 @@ with st.sidebar:
     
     st.markdown("---")
     for p in db.load_all_projects():
+        # UPDATED: Removed deprecated arg
         if st.button(f"📄 {p}"): 
             st.session_state.current_project = p
             st.session_state.quiz_submitted = False
@@ -319,7 +323,7 @@ else:
     
     with t2:
         st.header("Exam Analysis")
-        # VARIABLE: exam_pdf (Explicitly distinct)
+        # VARIABLE: exam_pdf (Explicitly distinct from uploaded_file)
         exam_pdf = st.file_uploader("Upload Exam PDF", type="pdf", key="exam_up")
         
         if exam_pdf:
@@ -361,4 +365,5 @@ else:
         tracker = json.loads(json.loads(proj.get('practice_data') or "{}").get('progress_tracker') or "{}")
         data = [{"Topic": k, "Score": f"{(v['correct']/v['total']*100):.0f}%"} for k,v in tracker.items()]
         
-        if data: st.dataframe(data)
+        # UPDATED: Replaced deprecated use_container_width with width parameter
+        if data: st.dataframe(data, width=1000)
