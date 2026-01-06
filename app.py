@@ -603,16 +603,17 @@ else:
             st.header("📈 Exam Paper Analysis")
             st.info("Upload a past paper. **Supports both text PDFs and Scanned Images!**")
             
-            # --- FIXED VARIABLE NAME HERE (Line 420) ---
+            # FIXED: Variable name is uploaded_pdf
             uploaded_pdf = st.file_uploader("Upload Past Paper PDF", type="pdf", key="exam_pdf_uploader")
             
             if uploaded_pdf:
                 # Cache content to prevent re-reading on every rerun
+                # FIXED: Checking uploaded_pdf.file_id
                 if st.session_state.last_uploaded_exam_id != uploaded_pdf.file_id:
                     with st.spinner("Reading PDF..."):
                         txt, imgs = extract_content_smart(uploaded_pdf)
                         st.session_state.exam_analysis_content_cache = (txt, imgs)
-                        # --- FIXED VARIABLE NAME HERE (Line 429) ---
+                        # FIXED: Saving uploaded_pdf.file_id
                         st.session_state.last_uploaded_exam_id = uploaded_pdf.file_id 
                 
                 txt_content, img_content = st.session_state.exam_analysis_content_cache
