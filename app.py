@@ -4,6 +4,12 @@ from groq import Groq
 import sqlite3
 import json
 import base64
+import pytesseract
+from pdf2image import convert_from_bytes
+from PIL import Image
+
+pytesseract.pytesseract.tesseract_cmd = "/opt/homebrew/bin/tesseract"
+
 
 # --- MODEL CONSTANT ---
 # Current stable Groq model for fast, high-quality responses.
@@ -752,24 +758,62 @@ def display_and_grade_quiz(project_name, quiz_json_str):
 
 # --- UTILITY FUNCTIONS ---
 
-def extract_content_text_only(uploaded_file):
+def extract_pdf_content(uploaded_file):
+
     uploaded_file.seek(0)
-    doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
-    full_content = ""
+    file_bytes = uploaded_file.read()
+
+    # ---------- STEP 1: NORMAL TEXT EXTRACTION ----------
+    doc = fitz.open(stream=file_bytes, filetype="pdf")
+    full_text = ""
+
     progress_container = st.empty()
     bar = st.progress(0)
+
     total_pages = len(doc)
+
     for i, page in enumerate(doc):
         bar.progress((i + 1) / total_pages)
-        progress_container.caption(f"📄 Extracting Text from Page {i+1} of {total_pages}...")
+        progress_container.caption(f"📄 Extracting Text Page {i+1}/{total_pages}")
+
         try:
-            text = page.get_text("text") 
-            full_content += f"\n--- PAGE_BREAK ---\n{text}\n"
+            text = page.get_text("text")
+            full_text += f"\n--- PAGE_BREAK ---\n{text}\n"
         except:
-            full_content += f"\n--- PAGE_BREAK ---\n(Error extracting text on page {i+1})\n"
+            pass
+
     progress_container.empty()
     bar.empty()
-    return full_content
+
+    # ---------- STEP 2: QUALITY CHECK ----------
+    if len(full_text.strip()) > 500:
+        return full_text
+
+    # ---------- STEP 3: OCR FALLBACK ----------
+    st.warning("⚠️ Low text detected. Switching to OCR scanning...")
+
+    images = convert_from_bytes(file_bytes)
+
+    ocr_text = ""
+    progress_container = st.empty()
+    bar = st.progress(0)
+
+    for i, img in enumerate(images):
+        bar.progress((i + 1) / len(images))
+        progress_container.caption(f"🔍 OCR Processing Page {i+1}/{len(images)}")
+
+        try:
+            text = pytesseract.image_to_string(img)
+            ocr_text += f"\n--- PAGE_BREAK ---\n{text}\n"
+        except:
+            pass
+
+    progress_container.empty()
+    bar.empty()
+
+    return ocr_text
+
+    
 
 # --- SIDEBAR (NAVIGATION) ---
 with st.sidebar:
@@ -860,7 +904,7 @@ if st.session_state.current_project is None:
         if st.button("✨ Create & Generate Study Guide", type="primary"):
             
             with st.spinner("Step 1: Extracting text from PDF..."):
-                raw_text = extract_content_text_only(uploaded_file)
+                raw_text = extract_pdf_content(uploaded_file)
             
             if len(raw_text) > 50:
                 with st.spinner("Step 2: Synthesizing notes with Groq LLM..."):
@@ -956,7 +1000,7 @@ else:
             if uploaded_pdf:
                 if not uploaded_pdf.file_id == st.session_state.get('last_uploaded_exam_pdf_id'):
                     with st.spinner("Extracting text from PDF..."):
-                        pdf_text = extract_content_text_only(uploaded_pdf)
+                        pdf_text = extract_pdf_content(uploaded_pdf)
                     
                     st.session_state.exam_analysis_pdf_content = pdf_text
                     st.session_state.last_uploaded_exam_pdf_id = uploaded_pdf.file_id
