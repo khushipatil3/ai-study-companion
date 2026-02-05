@@ -1,14 +1,19 @@
 import streamlit as st
-import fitz # PyMuPDF for PDF processing
+import fitz
 from groq import Groq
 import sqlite3
 import json
 import base64
+
 import pytesseract
 from pdf2image import convert_from_bytes
 from PIL import Image
+import shutil
 
-pytesseract.pytesseract.tesseract_cmd = "/opt/homebrew/bin/tesseract"
+tesseract_path = shutil.which("tesseract")
+
+if tesseract_path:
+    pytesseract.pytesseract.tesseract_cmd = tesseract_path
 
 
 # --- MODEL CONSTANT ---
