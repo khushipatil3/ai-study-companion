@@ -67,14 +67,9 @@ class StudyDB:
         return sqlite3.connect(self.db_name)
 
     def init_db(self):
-        """
-        Creates the database table if it doesn't exist and handles schema migration
-        for 'practice_data', 'analogy_data', and 'exam_analysis'.
-        """
         conn = self.connect()
         c = conn.cursor()
-        
-        # 1. CREATE TABLE IF NOT EXISTS - Use the latest schema definition
+
         c.execute('''
             CREATE TABLE IF NOT EXISTS projects (
                 name TEXT PRIMARY KEY,
@@ -88,61 +83,64 @@ class StudyDB:
             )
         ''')
 
-        # 2. SCHEMA MIGRATION: Check and add columns
         for col_name in ['practice_data', 'analogy_data', 'exam_analysis']:
             try:
                 c.execute(f"SELECT {col_name} FROM projects LIMIT 1")
-            except sqlite3.OperationalError as e:
-                if "no such column" in str(e):
-                    # st.warning(f"Database migration: Adding '{col_name}' column.")
-                    c.execute(f"ALTER TABLE projects ADD COLUMN {col_name} TEXT DEFAULT '{{}}'")
-                else:
-                    raise e 
-        
+            except sqlite3.OperationalError:
+                c.execute(f"ALTER TABLE projects ADD COLUMN {col_name} TEXT DEFAULT '{{}}'")
+
         conn.commit()
         conn.close()
 
-    def save_project(self, name, level, notes, raw_text, practice_data="{}", analogy_data="{}", exam_analysis="{}"):
-        """Saves a new project or updates an existing one."""
+    def save_project(self, name, level, notes, raw_text,
+                     practice_data="{}", analogy_data="{}", exam_analysis="{}"):
+
         conn = self.connect()
         c = conn.cursor()
+
         c.execute('''
-            INSERT OR REPLACE INTO projects (name, level, notes, raw_text, progress, practice_data, analogy_data, exam_analysis)
+            INSERT OR REPLACE INTO projects
+            (name, level, notes, raw_text, progress, practice_data, analogy_data, exam_analysis)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ''', (name, level, notes, raw_text, 0, practice_data, analogy_data, exam_analysis))
+
         conn.commit()
         conn.close()
 
+    # ---------- SAFE FIELD UPDATE ----------
     def update_project_json_field(self, name, field_name, key, content):
-        """Updates a specific key within a JSON field (e.g., practice_data, analogy_data, or exam_analysis)."""
-        project_data = self.get_project_details(name)
-        if not project_data or field_name not in project_data:
+
+        allowed_fields = ["practice_data", "analogy_data", "exam_analysis"]
+        if field_name not in allowed_fields:
             return
 
-        # Safely load existing data, defaulting to an empty dict
+        project_data = self.get_project_details(name)
+        if not project_data:
+            return
+
         data_dict = json.loads(project_data.get(field_name) or "{}")
         data_dict[key] = content
-        
+
         conn = self.connect()
         c = conn.cursor()
+
         c.execute(f'''
             UPDATE projects SET {field_name} = ? WHERE name = ?
         ''', (json.dumps(data_dict), name))
+
         conn.commit()
         conn.close()
-        
-    def update_practice_data(self, name, key, content):
-        return self.update_project_json_field(name, 'practice_data', key, content)
-        
-    def update_analogy_data(self, name, key, content):
-        return self.update_project_json_field(name, 'analogy_data', key, content)
-        
-    def update_exam_analysis_data(self, name, key, content):
-        return self.update_project_json_field(name, 'exam_analysis', key, content)
 
+    def update_practice_data(self, name, key, content):
+        self.update_project_json_field(name, "practice_data", key, content)
+
+    def update_analogy_data(self, name, key, content):
+        self.update_project_json_field(name, "analogy_data", key, content)
+
+    def update_exam_analysis_data(self, name, key, content):
+        self.update_project_json_field(name, "exam_analysis", key, content)
 
     def load_all_projects(self):
-        """Fetches a list of all project names."""
         conn = self.connect()
         c = conn.cursor()
         c.execute("SELECT name FROM projects")
@@ -151,13 +149,18 @@ class StudyDB:
         return projects
 
     def get_project_details(self, name):
-        """Fetches the full details of a specific project."""
         conn = self.connect()
         c = conn.cursor()
-        # Ensure we select all columns, including 'exam_analysis'
-        c.execute("SELECT name, level, notes, raw_text, progress, practice_data, analogy_data, exam_analysis FROM projects WHERE name=?", (name,))
+
+        c.execute("""
+            SELECT name, level, notes, raw_text, progress,
+                   practice_data, analogy_data, exam_analysis
+            FROM projects WHERE name=?
+        """, (name,))
+
         row = c.fetchone()
         conn.close()
+
         if row:
             return {
                 "name": row[0],
@@ -169,56 +172,67 @@ class StudyDB:
                 "analogy_data": row[6],
                 "exam_analysis": row[7]
             }
+
         return None
-        
+
+    # ---------- FIXED PROGRESS TRACKER ----------
     def update_progress_tracker(self, project_name, concept_scores):
-        """
-        Updates the progress tracker JSON field within practice_data.
-        concept_scores is a dict: {topic: (correct_count, total_count)}
-        """
+
         project_data = self.get_project_details(project_name)
         if not project_data:
             return
 
         practice_dict = json.loads(project_data.get('practice_data') or "{}")
-        
-        # Load or initialize the tracker
-        tracker = json.loads(practice_dict.get('progress_tracker') or "{}")
+
+        tracker_raw = practice_dict.get('progress_tracker') or {}
+
+        if isinstance(tracker_raw, str):
+            try:
+                tracker = json.loads(tracker_raw)
+            except:
+                tracker = {}
+        else:
+            tracker = tracker_raw
 
         for concept, (correct, total) in concept_scores.items():
+
             if concept not in tracker:
                 tracker[concept] = {"correct": 0, "total": 0}
-            
+
             tracker[concept]["correct"] += correct
             tracker[concept]["total"] += total
-        
-        # Save updated tracker back into practice_data
-        practice_dict['progress_tracker'] = json.dumps(tracker)
+
+        practice_dict['progress_tracker'] = tracker
 
         conn = self.connect()
         c = conn.cursor()
-        c.execute('''
+
+        c.execute("""
             UPDATE projects SET practice_data = ? WHERE name = ?
-        ''', (json.dumps(practice_dict), project_name))
+        """, (json.dumps(practice_dict), project_name))
+
         conn.commit()
         conn.close()
 
     def reset_progress_tracker(self, project_name):
-        """Clears the progress_tracker field for a given project."""
+
         project_data = self.get_project_details(project_name)
         if not project_data:
             return
-            
+
         practice_dict = json.loads(project_data.get('practice_data') or "{}")
-        practice_dict['progress_tracker'] = json.dumps({}) # Set tracker to empty JSON
-        
+        practice_dict['progress_tracker'] = {}
+
         conn = self.connect()
         c = conn.cursor()
-        c.execute('''
+
+        c.execute("""
             UPDATE projects SET practice_data = ? WHERE name = ?
-        ''', (json.dumps(practice_dict), project_name))
+        """, (json.dumps(practice_dict), project_name))
+
         conn.commit()
         conn.close()
+
         
 
 db = StudyDB() # Initialize DB
@@ -611,7 +625,7 @@ def display_and_grade_quiz(project_name, quiz_json_str):
                 
                 # MCQ questions
                 elif q['type'] == 'MCQ':
-                    options_display = [opt.split(': ')[1] if ': ' in opt else opt for opt in options] 
+                    options_display = [opt.split(': ', 1)[-1] for opt in options]
                     
                     default_index = None
                     stored_answer_letter = user_answers.get(q_id)
@@ -945,7 +959,7 @@ else:
                         pdf_text = extract_content_text_only(uploaded_pdf)
                     
                     st.session_state.exam_analysis_pdf_content = pdf_text
-                    st.session_state.last_uploaded_exam_pdf_id = uploaded_file.file_id
+                    st.session_state.last_uploaded_exam_pdf_id = uploaded_pdf.file_id
                     
                     if len(pdf_text.strip()) < 100:
                         st.warning("⚠️ **Low Text Quality Detected.** This likely means the PDF contains scanned images of questions, which the application cannot read. The analysis will fail unless you upload a digitally created (searchable) PDF.")
@@ -1140,7 +1154,13 @@ else:
         with tab3:
             st.header("📊 Study Progress Tracker")
             
-            progress_tracker = json.loads(practice_data.get('progress_tracker') or "{}")
+            tracker_raw = practice_data.get('progress_tracker') or {}
+
+            if isinstance(tracker_raw, str):
+                progress_tracker = json.loads(tracker_raw)
+            else:
+                progress_tracker = tracker_raw
+
             
             # Reset button for progress tracker
             if st.button("⚠️ Clear Progress Data", type="secondary", help="This will delete all your quiz scores and progress history for this project. Use this to reset the adaptive logic after a code update or data corruption."):
