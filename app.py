@@ -762,6 +762,80 @@ def display_and_grade_quiz(project_name, quiz_json_str):
     return
 
 # --- UTILITY FUNCTIONS ---
+import re
+
+def clean_ocr_text(text):
+
+    replacements = {
+        "Sectlon": "Section",
+        "Ql": "Q1",
+        "Deflne": "Define",
+        "Recurslon": "Recursion",
+        "|": "I"
+    }
+
+    for wrong, correct in replacements.items():
+        text = text.replace(wrong, correct)
+
+    text = re.sub(r'\s+', ' ', text)
+    text = re.sub(r'(Q\d+)', r'\n\1', text)
+    text = re.sub(r'(Section\s+[A-Z])', r'\n\1', text)
+
+    return text
+
+def detect_exam_structure(text):
+
+    questions = re.findall(r'(Q\d+.*?)(?=Q\d+|$)', text)
+
+    marks = re.findall(r'(\d+)\s*[Mm]arks', text)
+
+    sections = re.findall(r'Section\s+[A-Z]', text)
+
+    structure = {
+        "sections": list(set(sections)),
+        "total_questions": len(questions),
+        "marks_distribution": marks
+    }
+
+    return structure
+def analyze_topic_frequency(text):
+
+    import re
+
+    # Extract candidate topics (simple heuristic using capitalized words and phrases)
+    topics = re.findall(r'\b[A-Z][a-zA-Z\s]{3,}\b', text)
+
+    topic_freq = {}
+
+    for topic in topics:
+        topic = topic.strip()
+        if len(topic) < 4:
+            continue
+
+        topic_freq[topic] = topic_freq.get(topic, 0) + 1
+
+    # Sort topics by frequency
+    sorted_topics = sorted(topic_freq.items(), key=lambda x: x[1], reverse=True)
+
+    return sorted_topics[:10]  # Top 10 repeated topics
+    
+def enhance_exam_analysis_input(raw_text):
+
+    cleaned_text = clean_ocr_text(raw_text)
+
+    structure = detect_exam_structure(cleaned_text)
+
+    enhanced_prompt = f"""
+Exam Paper Cleaned Content:
+{cleaned_text}
+
+Detected Structure:
+Sections: {structure['sections']}
+Total Questions: {structure['total_questions']}
+Marks Distribution: {structure['marks_distribution']}
+"""
+
+    return enhanced_prompt
 
 def extract_pdf_content(uploaded_file):
 
@@ -993,63 +1067,82 @@ else:
         # --- TAB: EXAM ANALYSIS (FINAL REVISION) ---
         with tab_exam:
             st.header("📈 Past Paper & Question Bank Analysis")
-            # Set this section to be empty until analysis is run, as requested previously
+        
             st.markdown("""
                 Upload a past paper or question bank PDF below.
-                The AI will analyze the **extracted text** from the PDF to identify key trends and repeated questions.
+                The AI will analyze the extracted text to identify key trends.
             """)
-            
-            uploaded_pdf = st.file_uploader("Upload Past Paper PDF", type="pdf", key="exam_pdf_uploader")
-            
-            # Logic to handle PDF upload and extraction
+        
+            uploaded_pdf = st.file_uploader(
+                "Upload Past Paper PDF",
+                type="pdf",
+                key="exam_pdf_uploader"
+            )
+        
+            # ---------- FILE UPLOAD HANDLING ----------
             if uploaded_pdf:
+        
                 if not uploaded_pdf.file_id == st.session_state.get('last_uploaded_exam_pdf_id'):
                     with st.spinner("Extracting text from PDF..."):
                         pdf_text = extract_pdf_content(uploaded_pdf)
-                    
+        
                     st.session_state.exam_analysis_pdf_content = pdf_text
                     st.session_state.last_uploaded_exam_pdf_id = uploaded_pdf.file_id
-                    
+        
                     if len(pdf_text.strip()) < 100:
-                        st.warning("⚠️ **Low Text Quality Detected.** This likely means the PDF contains scanned images of questions, which the application cannot read. The analysis will fail unless you upload a digitally created (searchable) PDF.")
-                    st.info(f"Loaded **{len(pdf_text)}** characters of text for analysis.")
-                    
+                        st.warning("⚠️ Low text quality detected.")
+        
+                    st.info(f"Loaded {len(pdf_text)} characters of text.")
+        
                 else:
-                    st.info(f"Using previously extracted content (**{len(st.session_state.exam_analysis_pdf_content)}** characters) from the uploaded file.")
-
-                # 3. Analysis Button
+                    st.info(
+                        f"Using cached content ({len(st.session_state.exam_analysis_pdf_content)} characters)"
+                    )
+        
+                # ---------- ANALYSIS BUTTON ----------
                 if st.button("🎯 Run Exam Analysis", type="primary"):
+        
                     question_content = st.session_state.exam_analysis_pdf_content
-                    
+        
                     if len(question_content.strip()) < 100:
-                        st.error("The extracted text from the PDF is too short for meaningful analysis. Please check your file.")
+                        st.error("Not enough text for analysis.")
+        
                     else:
+                        enhanced_content = enhance_exam_analysis_input(question_content)
+        
                         analysis_result = analyze_past_papers(
-                            paper_content=question_content, 
+                            paper_content=enhanced_content,
                             client=client
                         )
-                        
+        
+                        # Save result
                         current_hash = hash(question_content)
                         analysis_key = f"analysis_{current_hash}"
-                        db.update_exam_analysis_data(project_data['name'], analysis_key, analysis_result)
-                        
+        
+                        db.update_exam_analysis_data(
+                            project_data['name'],
+                            analysis_key,
+                            analysis_result
+                        )
+        
                         st.session_state.exam_analysis_text = analysis_result
-                        st.rerun() 
+                        st.rerun()
+        
             else:
                 st.session_state.exam_analysis_pdf_content = ""
                 st.session_state.last_uploaded_exam_pdf_id = None
-            
+        
             st.divider()
-            
-            # Display stored or generated analysis
+        
+            # ---------- RESULT DISPLAY ----------
             analysis_to_display = st.session_state.get('exam_analysis_text')
-            
+        
             if analysis_to_display:
                 st.subheader("AI Exam Analysis Report")
                 st.markdown(analysis_to_display)
             else:
-                st.info("Upload a past paper PDF and click 'Run Exam Analysis' to generate a report.")
-
+                st.info("Upload a past paper and run analysis.")
+        
 
         # --- TAB 2: PRACTICES ---
         with tab2:
