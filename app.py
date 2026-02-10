@@ -818,6 +818,59 @@ def analyze_topic_frequency(text):
     sorted_topics = sorted(topic_freq.items(), key=lambda x: x[1], reverse=True)
 
     return sorted_topics[:10]  # Top 10 repeated topics
+def analyze_marks_weightage(text):
+
+    import re
+
+    question_blocks = re.findall(r'(Q\d+.*?)(?=Q\d+|$)', text)
+
+    weightage_map = {}
+
+    for block in question_blocks:
+
+        marks = re.findall(r'(\d+)\s*[Mm]arks', block)
+        topics = re.findall(r'\b[A-Z][a-zA-Z\s]{3,}\b', block)
+
+        if marks:
+            mark_value = int(marks[0])
+
+            for topic in topics:
+                topic = topic.strip()
+
+                if topic not in weightage_map:
+                    weightage_map[topic] = []
+
+                weightage_map[topic].append(mark_value)
+
+    avg_weightage = {
+        topic: sum(vals) / len(vals)
+        for topic, vals in weightage_map.items()
+    }
+
+    sorted_weightage = sorted(avg_weightage.items(), key=lambda x: x[1], reverse=True)
+
+    return sorted_weightage[:10]
+def generate_predicted_questions(topics, client):
+
+    topic_list = ", ".join([t[0] for t in topics])
+
+    prompt = f"""
+Based on historical exam trends, generate 5 highly probable exam questions from these topics:
+
+Topics:
+{topic_list}
+
+Output only questions in markdown bullet format.
+"""
+
+    completion = client.chat.completions.create(
+        model=GROQ_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.6
+    )
+
+    return completion.choices[0].message.content
+
     
 def enhance_exam_analysis_input(raw_text):
 
@@ -1101,47 +1154,54 @@ else:
         
                 # ---------- ANALYSIS BUTTON ----------
                 if st.button("🎯 Run Exam Analysis", type="primary"):
-        
+                
                     question_content = st.session_state.exam_analysis_pdf_content
-        
+                
                     if len(question_content.strip()) < 100:
                         st.error("Not enough text for analysis.")
-        
+                
                     else:
+                        # --- Phase 2 Input Enhancement ---
                         enhanced_content = enhance_exam_analysis_input(question_content)
-        
+                
+                        # --- Core Exam Analysis ---
                         analysis_result = analyze_past_papers(
                             paper_content=enhanced_content,
                             client=client
                         )
-        
-                        # Save result
+                
+                        # --- Phase 2.5 Intelligence ---
+                        freq_topics = analyze_topic_frequency(enhanced_content)
+                        weight_topics = analyze_marks_weightage(enhanced_content)
+                        predicted_qs = generate_predicted_questions(freq_topics, client)
+                
+                        analysis_result += "\n\n---\n### 📊 Topic Frequency Trends\n"
+                        analysis_result += "\n".join(
+                            [f"- {t[0]} ({t[1]} occurrences)" for t in freq_topics]
+                        )
+                
+                        analysis_result += "\n\n---\n### 🎯 High Marks Weightage Topics\n"
+                        analysis_result += "\n".join(
+                            [f"- {t[0]} (Avg Marks: {t[1]:.1f})" for t in weight_topics]
+                        )
+                
+                        analysis_result += "\n\n---\n### 🔮 Predicted Important Questions\n"
+                        analysis_result += predicted_qs
+                
+                        # --- Save Result ---
                         current_hash = hash(question_content)
                         analysis_key = f"analysis_{current_hash}"
-        
+                
                         db.update_exam_analysis_data(
                             project_data['name'],
                             analysis_key,
                             analysis_result
                         )
-        
+                
+                        # --- Update Session + Refresh ---
                         st.session_state.exam_analysis_text = analysis_result
                         st.rerun()
-        
-            else:
-                st.session_state.exam_analysis_pdf_content = ""
-                st.session_state.last_uploaded_exam_pdf_id = None
-        
-            st.divider()
-        
-            # ---------- RESULT DISPLAY ----------
-            analysis_to_display = st.session_state.get('exam_analysis_text')
-        
-            if analysis_to_display:
-                st.subheader("AI Exam Analysis Report")
-                st.markdown(analysis_to_display)
-            else:
-                st.info("Upload a past paper and run analysis.")
+
         
 
         # --- TAB 2: PRACTICES ---
