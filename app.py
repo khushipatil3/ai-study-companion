@@ -850,6 +850,7 @@ def analyze_marks_weightage(text):
     sorted_weightage = sorted(avg_weightage.items(), key=lambda x: x[1], reverse=True)
 
     return sorted_weightage[:10]
+    
 def generate_predicted_questions(topics, client):
 
     topic_list = ", ".join([t[0] for t in topics])
@@ -870,6 +871,22 @@ Output only questions in markdown bullet format.
     )
 
     return completion.choices[0].message.content
+
+def aggregate_exam_trends(exam_analysis_data):
+
+    combined_text = " ".join(exam_analysis_data.values())
+
+    topics = analyze_topic_frequency(combined_text)
+
+    total_occurrences = sum([t[1] for t in topics]) or 1
+
+    probability_scores = [
+        (topic, round((count / total_occurrences) * 100, 2))
+        for topic, count in topics
+    ]
+
+    return probability_scores
+
 
     
 def enhance_exam_analysis_input(raw_text):
@@ -1202,7 +1219,32 @@ else:
                         st.session_state.exam_analysis_text = analysis_result
                         st.rerun()
 
-        
+            st.divider()
+
+            # ---------- RESULT DISPLAY ----------
+            analysis_to_display = st.session_state.get('exam_analysis_text')
+            
+            if analysis_to_display:
+                st.subheader("AI Exam Analysis Report")
+                st.markdown(analysis_to_display)
+            else:
+                st.info("Upload a past paper and run analysis.")
+
+                
+            # --- Phase 3 Multi-Paper Trends ---
+            if exam_analysis_data and len(exam_analysis_data) > 1:
+            
+                st.divider()
+                st.subheader("📚 Cross-Paper Long-Term Trends")
+            
+                aggregated_trends = aggregate_exam_trends(exam_analysis_data)
+            
+                for topic, probability in aggregated_trends:
+                    st.markdown(f"- **{topic}** → {probability}% exam probability")
+
+
+
+
 
         # --- TAB 2: PRACTICES ---
         with tab2:
